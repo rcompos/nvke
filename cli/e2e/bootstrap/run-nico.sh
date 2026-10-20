@@ -19,9 +19,10 @@
 #      the Kind bridge and the node bridge, which the CNI firewall otherwise
 #      drops. The command then deploys everything, including CAPNICo, which asks
 #      nico-sim for the machines.
-#   4. The cluster the command built: its nodes are Ready, each node's spire-agent
-#      attested to the bootstrap SPIRE server over TPM, and the allowlist that
-#      admitted it was filled in by CWE from the NicoMachine, not by the site spec.
+#   4. The cluster the command built: its nodes are Ready, it manages itself
+#      after the pivot, each node's spire-agent attested over TPM to the site's
+#      SPIRE server at the VIP, and the allowlist that admitted it was filled in
+#      by CWE from the NicoMachine, not by the site spec.
 #
 # Four inputs the bootstrap reads and this script prepares:
 #   - NVKECTL_NICO_CREDENTIALS: the token file for nico-sim's API.
@@ -726,6 +727,19 @@ KIND_EXPERIMENTAL_PROVIDER=nerdctl kind get kubeconfig --name "${BOOTSTRAP_KIND_
   >"${bootstrap_kubeconfig}" || fail "could not read the bootstrap cluster's kubeconfig"
 defer rm -f "${bootstrap_kubeconfig}"
 bk() { kubectl --kubeconfig "${bootstrap_kubeconfig}" "$@"; }
+sk() { kubectl --kubeconfig "${TENANT_KUBECONFIG}" "$@"; }
+
+# The pivot moved the management plane: the site holds the Cluster API objects
+# and runs the controller, and the seed's controller is stopped.
+grep -q "pivot complete: the site manages itself" <<<"${output}" ||
+  fail "the command exited 0 without reporting the pivot complete"
+sk -n nvke-system get clusters.cluster.x-k8s.io "${E2E_CLUSTER_NAME}" >/dev/null 2>&1 ||
+  fail "the site cluster does not hold its own Cluster API object nvke-system/${E2E_CLUSTER_NAME}"
+[ -z "$(bk -n nvke-system get clusters.cluster.x-k8s.io --ignore-not-found -o name "${E2E_CLUSTER_NAME}")" ] ||
+  fail "the bootstrap cluster still holds the Cluster API object nvke-system/${E2E_CLUSTER_NAME} after the pivot"
+seed_replicas="$(bk -n "${CONTROLLER_NAMESPACE}" get deployment nke-controller -o 'jsonpath={.spec.replicas}')"
+[ "${seed_replicas}" = "0" ] || fail "the bootstrap cluster's controller runs ${seed_replicas} replica(s) after the pivot, want 0"
+log "PASS: the pivot moved the Cluster API objects to the site and stopped the bootstrap controller"
 
 # What the node login and infra.nico.releases asked for, which the
 # controller needed to create the first node at all.
@@ -754,41 +768,40 @@ if ! wait_until "${NVKECTL_E2E_NODE_READY_TIMEOUT_SECONDS:-600}" 5 nodes_ready; 
 fi
 log "PASS: all ${NODE_COUNT} node(s) are Ready in the cluster nvkectl built"
 
-# The address CWE wrote into each node's userdata is the one nodes can reach
-# before any cluster exists: the host on the node network, on the NodePort the
-# bootstrap publishes SPIRE on, not the in-cluster name.
+# The SPIRE handover repointed each node from the bootstrap SPIRE server at
+# spire.externalAddress to the site's, published on the same NodePort at the VIP.
 for node in $(nerdctl ps -q --filter "label=${SIM_LABEL}"); do
   agent_conf="$(nerdctl exec "${node}" cat /etc/spire-agent/agent.conf 2>/dev/null)" ||
     fail "could not read /etc/spire-agent/agent.conf on node ${node}"
-  grep -q "${GATEWAY}" <<<"${agent_conf}" ||
-    fail "node ${node}'s spire-agent is not configured for ${GATEWAY} (spire.externalAddress)" "${agent_conf}"
+  grep -q "${CONTROL_PLANE_VIP}" <<<"${agent_conf}" ||
+    fail "node ${node}'s spire-agent is not configured for the site's SPIRE server at ${CONTROL_PLANE_VIP}" "${agent_conf}"
   grep -q "30081" <<<"${agent_conf}" ||
     fail "node ${node}'s spire-agent is not configured for the published SPIRE NodePort 30081" "${agent_conf}"
 done
-log "PASS: each node's spire-agent points at spire.externalAddress ${GATEWAY}, on NodePort 30081"
+log "PASS: each node's spire-agent points at the site's SPIRE server ${CONTROL_PLANE_VIP}, on NodePort 30081"
 
 # The allowlist is the point of the dynamic path: nothing in the site spec
 # lists a thumbprint, so every hash SPIRE admits came from a NicoMachine.
-hashes="$(bk get nicomachines.infrastructure.cluster.x-k8s.io -A \
+hashes="$(sk get nicomachines.infrastructure.cluster.x-k8s.io -A \
   -o 'jsonpath={range .items[*]}{.status.tpmEkPubHash}{"\n"}{end}' | sed '/^$/d' | sort -u)"
 hash_count="$(printf '%s\n' "${hashes}" | sed '/^$/d' | wc -l | tr -d ' ')"
 [ "${hash_count}" -eq "${NODE_COUNT}" ] ||
   fail "${hash_count} NicoMachine(s) report a TPM EK hash, expected ${NODE_COUNT}"
-allowlist="$(bk -n spire-server get configmap tpm-pubhashes -o 'jsonpath={.data}' 2>/dev/null)"
+allowlist="$(sk -n spire-server get configmap tpm-pubhashes -o 'jsonpath={.data}' 2>/dev/null)"
 while read -r h; do
   [ -z "${h}" ] && continue
   grep -q "${h}" <<<"${allowlist}" || fail "the tpm-pubhashes allowlist is missing ${h}, which a NicoMachine reported"
 done <<<"${hashes}"
 log "PASS: CWE filled the SPIRE allowlist with the ${hash_count} EK hash(es) the NicoMachine(s) reported"
 
-agents="$(bk -n spire-server exec spire-server-0 -c spire-server -- \
+agents="$(sk -n spire-server exec spire-server-0 -c spire-server -- \
   /opt/spire/bin/spire-server agent list 2>/dev/null)"
 while read -r h; do
   [ -z "${h}" ] && continue
   grep -q "spiffe://${SPIRE_TRUST_DOMAIN}/spire/agent/tpm/${h}" <<<"${agents}" ||
     fail "no SPIRE agent attested by TPM with hash ${h}" "${agents}"
 done <<<"${hashes}"
-log "PASS: every node's spire-agent attested to the bootstrap SPIRE server over TPM"
+log "PASS: every node's spire-agent attested to the site's SPIRE server over TPM"
 
 if [ -n "${CONTROL_PLANE_VIP}" ]; then
   cp_node_ips="$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes \
