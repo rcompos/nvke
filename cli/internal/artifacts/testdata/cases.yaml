@@ -1,18 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Each entry names a file under testdata/ and the result the validator must
-# return for it. `expect: ok` means the file validates. Any other value is a
-# substring of the error message. `platform` is the target platform the
-# validator checks image outputs against. It defaults to linux/amd64.
-#
-# valid.json is a complete file in the shape nvkr release export emits, with
-# synthetic digests. Each file under cases/ is valid.json with one change.
-# nvkr/ holds two unmodified exports from the real exporter; they carry no
-# NVKE output and must fail only on the missing required output.
-#
-# Decoding is covered by file_test.go. The entries here are for the
-# validator, which follows in a later change.
+# Expected validator result per file: ok, or a substring of the error.
+# platform defaults to linux/amd64. Each file under cases/ is valid.json with
+# one change. nvkr/ holds unmodified nvkr release exports with no NVKE output.
 
 - file: valid.json
   expect: ok

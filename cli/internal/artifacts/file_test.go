@@ -23,9 +23,7 @@ func decodeFile(t *testing.T, path string) *File {
 	return f
 }
 
-// TestDecodeNVKRExport decodes two unmodified nvkr release export documents
-// and checks that the fields nvkectl reads come through, and that the rest
-// of the document does not get in the way.
+// The files under testdata/nvkr are unmodified nvkr release exports.
 func TestDecodeNVKRExport(t *testing.T) {
 	t.Run("helm chart and apt repository", func(t *testing.T) {
 		f := decodeFile(t, "nvkr/helm-export.json")
@@ -34,7 +32,7 @@ func TestDecodeNVKRExport(t *testing.T) {
 
 		chart := f.Output("gpu-runtime")
 		require.NotNil(t, chart)
-		assert.Equal(t, "helm-oci", chart.Kind)
+		assert.Equal(t, KindChart, chart.Kind)
 		assert.Equal(t, "1.0.0", chart.ChartVersion)
 		assert.True(t, strings.HasSuffix(chart.Reference, "@sha256:3c5490c74f24352b9dc8da0bb032dea92b5c531ef4fa7a640ecbd08f7cbe8888"))
 		assert.Nil(t, chart.Platforms())
@@ -43,7 +41,6 @@ func TestDecodeNVKRExport(t *testing.T) {
 		require.NotNil(t, apt)
 		assert.Equal(t, "apt-repository", apt.Kind)
 
-		// Evidence is present but carries no source for either output.
 		require.Len(t, f.Evidence, 2)
 		assert.Nil(t, f.Source("gpu-runtime"))
 		assert.Nil(t, f.Output("cwe"))
@@ -58,8 +55,6 @@ func TestDecodeNVKRExport(t *testing.T) {
 		assert.Equal(t, "executable", alpha.Kind)
 		assert.Equal(t, []string{"linux/amd64"}, alpha.Platforms())
 
-		// The source lives per evidence entry. alpha and beta come from one
-		// repository at different commits; omega has none.
 		require.NotNil(t, f.Source("alpha"))
 		assert.Equal(t, "https://example.test/one", f.Source("alpha").Repo)
 		assert.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", f.Source("alpha").Commit)
@@ -68,10 +63,6 @@ func TestDecodeNVKRExport(t *testing.T) {
 	})
 }
 
-// TestDecodeValid decodes the NVKE sample and checks the shapes the
-// installer relies on: every expected output with its kind, a
-// multi-platform image, a single-platform image, a chart, and a source read
-// through evidence.
 func TestDecodeValid(t *testing.T) {
 	f := decodeFile(t, "valid.json")
 	require.Len(t, f.Outputs, len(Outputs))
@@ -88,26 +79,14 @@ func TestDecodeValid(t *testing.T) {
 		}
 	}
 
-	cwe := f.Output("cwe")
-	require.NotNil(t, cwe)
-	assert.Equal(t, "oci", cwe.Kind)
-	assert.ElementsMatch(t, []string{"linux/amd64", "linux/arm64"}, cwe.Platforms())
+	assert.ElementsMatch(t, []string{"linux/amd64", "linux/arm64"}, f.Output("cwe").Platforms())
+	assert.Equal(t, []string{"linux/amd64"}, f.Output("controller-profiles").Platforms())
+	assert.Equal(t, "0.30.1", f.Output("spire").ChartVersion)
 	require.NotNil(t, f.Source("cwe"))
 	assert.Equal(t, "https://github.com/dsx-ai-factory/nvke", f.Source("cwe").Repo)
-
-	profiles := f.Output("controller-profiles")
-	require.NotNil(t, profiles)
-	assert.Equal(t, []string{"linux/amd64"}, profiles.Platforms())
-
-	spire := f.Output("spire")
-	require.NotNil(t, spire)
-	assert.Equal(t, "helm-oci", spire.Kind)
-	assert.Equal(t, "0.30.1", spire.ChartVersion)
 	assert.Nil(t, f.Source("spire"))
 }
 
-// TestDecodeMinimal decodes a hand-written file that carries only the
-// outputs list. Nothing else is required to decode.
 func TestDecodeMinimal(t *testing.T) {
 	f := decodeFile(t, "cases/minimal-hand-written.json")
 	assert.Empty(t, f.RootDigest)
@@ -119,8 +98,6 @@ func TestDecodeMinimal(t *testing.T) {
 	assert.Equal(t, "0.30.1", f.Output("spire").ChartVersion)
 }
 
-// TestDecodeCases decodes every case file. Only the file that is not JSON
-// fails here; the other rules belong to the validator.
 func TestDecodeCases(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "cases", "*.json"))
 	require.NoError(t, err)
