@@ -567,6 +567,7 @@ VERSION_CMDS := agent:--version \
                 management-engine:--version \
                 nvke-os-image-check:--version \
                 nvkectl:version \
+                rest-api:--version \
                 updater:--version
 
 version-check: build ## Verify every built binary reports a real version. (run by the merge gate)
