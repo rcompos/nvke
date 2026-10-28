@@ -69,11 +69,24 @@ func TestDecodeNVKRExport(t *testing.T) {
 }
 
 // TestDecodeValid decodes the NVKE sample and checks the shapes the
-// installer relies on: a multi-platform image, a single-platform image, a
-// chart, and a source read through evidence.
+// installer relies on: every expected output with its kind, a
+// multi-platform image, a single-platform image, a chart, and a source read
+// through evidence.
 func TestDecodeValid(t *testing.T) {
 	f := decodeFile(t, "valid.json")
-	require.Len(t, f.Outputs, 11)
+	require.Len(t, f.Outputs, len(Outputs))
+	for name, spec := range Outputs {
+		o := f.Output(name)
+		require.NotNil(t, o, name)
+		assert.Equal(t, spec.Kind, o.Kind, name)
+		if spec.Kind == KindChart {
+			assert.NotEmpty(t, o.ChartVersion, name)
+			assert.Nil(t, o.Platforms(), name)
+		} else {
+			assert.Empty(t, o.ChartVersion, name)
+			assert.NotEmpty(t, o.Platforms(), name)
+		}
+	}
 
 	cwe := f.Output("cwe")
 	require.NotNil(t, cwe)

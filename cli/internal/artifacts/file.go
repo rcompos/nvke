@@ -2,9 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package artifacts reads the artifact file: the JSON document that names
-// every image and chart nvkectl installs. CONTRACT.md in this directory is
-// the contract. The types here are the whole of what nvkectl decodes; every
-// other key in the document is dropped at decode time.
+// every image and chart nvkectl installs. It is the only source of images
+// and charts; the stack config names none.
+//
+// The contract is the type File. nvkectl decodes its fields and drops every
+// other key, so where the document comes from does not matter. nvkr release
+// export produces one that satisfies the contract unmodified. A build that
+// does not use NVKR writes the same fields by hand; the smallest such file
+// is testdata/cases/minimal-hand-written.json.
+//
+// Outputs lists the names nvkectl expects. The output names follow NVKR's
+// NVKE definition, inputs/definitions/nvke/definition.yaml in the nvkr
+// repository. Outputs with other names are dropped.
+//
+// Validation runs before anything is installed, in this order: the file is
+// JSON; every output name appears once and every required output is
+// present, nico-prereqs with nico; every expected output has the kind its
+// role needs and a reference with a digest; every image output serves the
+// target platform; every chart version is in the range the build supports;
+// every reference resolves; every chart renders with the embedded values
+// and passes a server-side dry run; the cluster preconditions hold. A
+// failure on one output names it as outputs[name=<name>]. testdata/cases.yaml
+// lists the expected result for every test file.
 package artifacts
 
 import (
@@ -12,6 +31,37 @@ import (
 	"fmt"
 	"io"
 )
+
+// Kinds of the outputs nvkectl installs.
+const (
+	KindImage = "oci"
+	KindChart = "helm-oci"
+)
+
+// Spec says what nvkectl expects of one named output.
+type Spec struct {
+	// Kind is KindImage or KindChart.
+	Kind string
+	// Required outputs must be present. nico and nico-prereqs are optional;
+	// nico-prereqs is required when nico is present.
+	Required bool
+}
+
+// Outputs is the contract: every output name nvkectl reads, with its kind
+// and whether it is required.
+var Outputs = map[string]Spec{
+	"cwe":                 {Kind: KindImage, Required: true},
+	"controller-profiles": {Kind: KindImage, Required: true},
+	"capnico-controller":  {Kind: KindImage, Required: true},
+	"controller-chart":    {Kind: KindChart, Required: true},
+	"nktp":                {Kind: KindChart, Required: true},
+	"postgresql":          {Kind: KindChart, Required: true},
+	"spire-crds":          {Kind: KindChart, Required: true},
+	"spire":               {Kind: KindChart, Required: true},
+	"temporal":            {Kind: KindChart, Required: true},
+	"nico":                {Kind: KindChart},
+	"nico-prereqs":        {Kind: KindChart},
+}
 
 // File is the subset of the artifact file that nvkectl reads.
 type File struct {
