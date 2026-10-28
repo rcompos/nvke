@@ -67,7 +67,6 @@ const legacyAutoinstallExclusionReason = "profile boots vmlinuz, initrd, and ISO
 // profile must be added here with an explicit reason before the suite will
 // register.
 var nicoVMSReleaseExclusions = []releaseExclusion{
-	{prefix: "nke-1.29.7-251119", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nke-1.31.12-251029-osmo", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nke-1.34.2-251201-amd64-", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nke-1.34.2-251205-amd64-", reason: legacyAutoinstallExclusionReason},
@@ -76,6 +75,12 @@ var nicoVMSReleaseExclusions = []releaseExclusion{
 	{prefix: "nke-260318-22.04-amd64", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nke-260319-22.04-amd64-osmo", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nke-260511-22.04-amd64", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-1.34.2-251201-amd64-", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-1.34.2-251205-amd64-", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-1.34.2-260616-amd64-", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-260313-22.04-amd64", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-260319-22.04-amd64-osmo", reason: legacyAutoinstallExclusionReason},
+	{prefix: "nvke-260511-22.04-amd64", reason: legacyAutoinstallExclusionReason},
 	{prefix: "nvke-local-dev-kindest-arm64", reason: "local kindest profile is an arm64 development placeholder, not a tenant release"},
 }
 

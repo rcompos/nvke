@@ -620,3 +620,56 @@ func TestBuildTeleportLabels(t *testing.T) {
 		assert.NotContains(t, got, uuid.Nil.String())
 	})
 }
+
+// TestUnit_RenderUserData_CLIExamplesDisablePasswordSSH keeps the shipped
+// release examples from enabling SSH password login. Subiquity turns
+// autoinstall ssh.allow-pw into cloud-init ssh_pwauth, and the user-data
+// section is merged on top of that, so both places are checked.
+func TestUnit_RenderUserData_CLIExamplesDisablePasswordSSH(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"nodepoolrelease.yaml", "clusterrelease.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Config{
+				DgxcTenantUser:     "test-admin",
+				DgxcTenantPassword: "test-password",
+				NodeAgent:          config.NodeAgentConfig{Port: "15005"},
+			}
+			deps := shared.MachineCreateDeps{
+				Config:                  cfg,
+				NodeAgentBootstrapFiles: testNodeAgentBootstrapFiles(cfg, ""),
+			}
+			template := releaseUserDataTemplate(t, filepath.Join("..", "..", "..", "..", "cli", "examples", name))
+
+			userData, err := renderUserData(
+				context.Background(),
+				deps,
+				template,
+				db.Node{Name: "test-node"},
+				db.DiskSelectionStrategyLargest,
+				"1.36.3",
+				&TeleportUserDataConfig{},
+				db.Cluster{CniPlugin: db.CNICalico, CniVersion: "3.31.5"},
+			)
+			require.NoError(t, err)
+
+			var doc struct {
+				Autoinstall struct {
+					SSH struct {
+						AllowPW       *bool `yaml:"allow-pw"`
+						InstallServer bool  `yaml:"install-server"`
+					} `yaml:"ssh"`
+					UserData map[string]any `yaml:"user-data"`
+				} `yaml:"autoinstall"`
+			}
+			require.NoError(t, yaml.Unmarshal([]byte(userData), &doc))
+
+			require.NotNil(t, doc.Autoinstall.SSH.AllowPW, "allow-pw must be stated, not left to subiquity's default")
+			assert.False(t, *doc.Autoinstall.SSH.AllowPW, "password SSH login must stay off")
+			assert.True(t, doc.Autoinstall.SSH.InstallServer)
+			assert.NotEqual(t, true, doc.Autoinstall.UserData["ssh_pwauth"], "user-data must not turn password SSH back on")
+		})
+	}
+}
