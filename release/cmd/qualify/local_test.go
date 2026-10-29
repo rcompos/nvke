@@ -65,14 +65,92 @@ func TestCollectDiagnosticsMovesWhatTheSuiteLeft(t *testing.T) {
 	}
 }
 
-func TestLocalNeedsAPlanAndAStage(t *testing.T) {
+func TestLocalNeedsAStage(t *testing.T) {
 	cmd := root()
 	cmd.SetArgs([]string{"local", "--stream", "s"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "plan") || !strings.Contains(err.Error(), "stage") {
-		t.Fatalf("want both required flags named, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "stage") || strings.Contains(err.Error(), "plan") {
+		t.Fatalf("want only --stage required, got %v", err)
+	}
+}
+
+func TestWithGitConfigAddsToWhatIsSet(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
+	t.Setenv("GIT_CONFIG_VALUE_0", "someone")
+	restore := withGitConfig("core.abbrev", "8")
+	if os.Getenv("GIT_CONFIG_COUNT") != "2" || os.Getenv("GIT_CONFIG_KEY_1") != "core.abbrev" || os.Getenv("GIT_CONFIG_VALUE_1") != "8" {
+		t.Fatalf("set %q %q=%q", os.Getenv("GIT_CONFIG_COUNT"), os.Getenv("GIT_CONFIG_KEY_1"), os.Getenv("GIT_CONFIG_VALUE_1"))
+	}
+	restore()
+	if os.Getenv("GIT_CONFIG_COUNT") != "1" || os.Getenv("GIT_CONFIG_KEY_1") != "" || os.Getenv("GIT_CONFIG_KEY_0") != "user.name" {
+		t.Errorf("not restored: count %q", os.Getenv("GIT_CONFIG_COUNT"))
+	}
+}
+
+// fakeTSH puts a tsh on PATH whose status lists logins and whose ssh reaches
+// only reachable as login, failing the way tsh does, with the host named.
+func fakeTSH(t *testing.T, validFor time.Duration, logins, reachable string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+status) printf '{"active":{"valid_until":"%s","logins":[%s]}}' "$VALID" "$LOGINS" ;;
+ssh) [ "$2" = "$REACHABLE" ] && exit 0; echo "ERROR: access denied to $2 connecting to ${2#*@}" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tsh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("VALID", time.Now().Add(validFor).UTC().Format(time.RFC3339))
+	t.Setenv("LOGINS", logins)
+	t.Setenv("REACHABLE", reachable)
+}
+
+const twoSites = `
+sites:
+  - jumpHost: "${FORGE_JUMP_HOST:-}"
+    teleportLogin: "${FORGE_TELEPORT_LOGIN:-}"
+  - jumpHost: "${FORGE_SITE_2_JUMP_HOST:-}"
+    teleportLogin: "${FORGE_SITE_2_TELEPORT_LOGIN:-}"
+`
+
+func TestCheckTeleportReachesTheJumpHostAsItsLogin(t *testing.T) {
+	fakeTSH(t, 4*time.Hour, `"me","root"`, "me@jump-1.example.test")
+	var c checks
+	c.checkTeleport(t.Context(), os.Environ(), []byte(twoSites), "full")
+	env := append(os.Environ(), "FORGE_JUMP_HOST=jump-1.example.test", "FORGE_TELEPORT_LOGIN=me")
+	c.checkTeleport(t.Context(), env, []byte(twoSites), "full")
+	if len(c.problems) != 1 || !strings.Contains(c.problems[0], "no jump host is set") {
+		t.Fatalf("problems %q", c.problems)
+	}
+	if c.site == nil || c.site.target() != "me@jump-1.example.test" || len(c.warnings) != 0 {
+		t.Errorf("site %+v warnings %q", c.site, c.warnings)
+	}
+}
+
+func TestCheckTeleportNamesTheVariableNotTheHost(t *testing.T) {
+	fakeTSH(t, 30*time.Minute, `"me"`, "nobody")
+	env := append(os.Environ(),
+		"FORGE_JUMP_HOST=jump-1.example.test", "FORGE_TELEPORT_LOGIN=me@example.test",
+		"FORGE_SITE_2_JUMP_HOST=jump-2.example.test", "FORGE_SITE_2_TELEPORT_LOGIN=me",
+	)
+	var c checks
+	c.checkTeleport(t.Context(), env, []byte(twoSites), "full")
+	all := strings.Join(append(c.problems, c.warnings...), "\n")
+	for _, want := range []string{"FORGE_TELEPORT_LOGIN is \"me@example.test\", which is not one of your Teleport logins (me)", "$FORGE_SITE_2_JUMP_HOST is not reachable", "Teleport login ends in"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("no %q in\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "jump-1.example.test") || strings.Contains(all, "jump-2.example.test") {
+		t.Errorf("a jump host is named:\n%s", all)
+	}
+	if c.site != nil {
+		t.Errorf("site %+v from no host reached", c.site)
 	}
 }

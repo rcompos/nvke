@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"math/bits"
 	"os"
 	"regexp"
 	"sort"
@@ -31,6 +32,57 @@ func RequiredEnv(environmentFile []byte) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// JumpHost names the variables one site's jump host and its Teleport login
+// are read from.
+type JumpHost struct {
+	HostVar, LoginVar string
+}
+
+var jumpHostRef = regexp.MustCompile(`(jumpHost|teleportLogin):\s*"\$\{([A-Za-z_][A-Za-z0-9_]*)`)
+
+// JumpHosts is every site's jump host in an environment file, in order, each
+// with the login declared after it.
+func JumpHosts(environmentFile []byte) []JumpHost {
+	var sites []JumpHost
+	for _, m := range jumpHostRef.FindAllSubmatch(environmentFile, -1) {
+		switch name := string(m[2]); string(m[1]) {
+		case "jumpHost":
+			sites = append(sites, JumpHost{HostVar: name})
+		case "teleportLogin":
+			if len(sites) > 0 && sites[len(sites)-1].LoginVar == "" {
+				sites[len(sites)-1].LoginVar = name
+			}
+		}
+	}
+	return sites
+}
+
+// DescribeAbbrev is the hash length git describe picks on its own in a
+// repository of count objects: enough hex digits to expect no collision,
+// and never fewer than seven. A clone with more objects than the publishers'
+// describes the same commit with a longer name, which names no artifact.
+func DescribeAbbrev(count int) int {
+	n := (bits.Len(uint(count)) + 1) / 2
+	if n < 7 {
+		return 7
+	}
+	return n
+}
+
+// DescribeHash is the abbreviated commit in a git describe name such as
+// v0.2.0-98-g2cfd0008, and whether there is one.
+func DescribeHash(version string) (string, bool) {
+	i := strings.LastIndex(version, "-g")
+	if i < 0 {
+		return "", false
+	}
+	hash := version[i+2:]
+	if len(hash) < 4 || strings.Trim(hash, "0123456789abcdef") != "" {
+		return "", false
+	}
+	return hash, true
 }
 
 // Missing is the names in want that environ leaves unset or empty.

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/dsx-ai-factory/nvke/release/internal/artifact"
 	"github.com/dsx-ai-factory/nvke/release/internal/lane"
 	"github.com/dsx-ai-factory/nvke/release/internal/qualification"
+	"github.com/dsx-ai-factory/nvke/release/internal/resolve"
 )
 
 // e2eDir is the suite's package, relative to the repository root.
@@ -32,54 +34,79 @@ const e2eDir = "controller/test/e2e"
 // there belongs to an earlier run and would be filed under this one.
 var leftInE2EDir = []string{"tenant-diagnostics.json", "nvkectl-diagnostics.tar.gz", "site-cluster-state.txt"}
 
+// stageLength is roughly how long each stage runs, site inputs included. A
+// Teleport login that ends sooner is worth renewing first.
+var stageLength = map[string]time.Duration{
+	"provision": 45 * time.Minute,
+	"bootstrap": 90 * time.Minute,
+	"full":      3 * time.Hour,
+}
+
 type localOptions struct {
-	plan, combination, stream string
-	stage, registry, ngcOrg   string
-	nodeUser, remote          string
-	workDir, siteInputs       string
-	keepSite, dryRun          bool
-	reuseSiteInputs           bool
-	skipVerify                bool
-	wait                      time.Duration
-	suiteArgs                 []string
+	plan, scope, version, resolution string
+	combination, stream              string
+	stage, registry, ngcOrg          string
+	nodeUser, remote                 string
+	workDir, siteInputs              string
+	keepSite, dryRun                 bool
+	reuseSiteInputs, skipVerify      bool
+	wait                             time.Duration
+	suiteArgs                        []string
 }
 
 func localCmd() *cobra.Command {
 	var o localOptions
 	cmd := &cobra.Command{
 		Use:   "local",
-		Short: "Run one stream of a plan on the hardware lane from this workstation",
-		Long: `Run one stream of a plan on the hardware lane from this workstation.
+		Short: "Run one stream on the hardware lane from this workstation",
+		Long: `Run one stream on the hardware lane from this workstation.
 
 Does what one leg of the qualify-e2e workflow does, with the credentials in
-this shell instead of the workflow's: checks every artifact the plan names,
-builds the site inputs, writes the e2e config, and runs the site controller
-suite with the workflow's flags and timeouts. Run it from the root of the
-checkout under test.
+this shell instead of the workflow's: plans, checks every artifact the plan
+names, builds the site inputs, writes the e2e config, and runs the site
+controller suite with the workflow's flags and timeouts. Run it from the root
+of the checkout under test.
+
+Without --plan it plans for itself, from --scope and --version, describing
+each commit at the length a fresh clone of --remote does. That is the clone
+the publishers tag from; a clone with more objects, forks fetched for one,
+describes the same commit with a longer name that names no artifact.
 
 Before any machine is taken it checks what the run needs and names every gap
 at once:
 
   FORGE_API_KEY            the Forge provider's credential
-  NGC_API_KEY              for --registry nvcr, with a docker login to nvcr.io
+  NGC_API_KEY              for --registry nvcr
   every ${NAME} the stream's environments/<provider>.yaml requires
-  tsh logged in            unless TELEPORT_IDENTITY_FILE or JUMP_HOST_PASSWORD is set
-  go, git, make, docker with buildx, and oras when nvkectl is published
+  docker                   running, with buildx, and able to read the images
+                           the run pulls: for nvcr.io, an NGC key made in the
+                           org they are published under
+  tsh                      logged in, unless TELEPORT_IDENTITY_FILE or
+                           JUMP_HOST_PASSWORD is set; every jump host set is
+                           reached as its login, which is one of the Logins
+                           tsh status lists, not the Teleport user
+  go, git, make, and oras when nvkectl is published
 
-Everything the run writes goes to --work-dir, outside the checkout: the e2e
-config, the site inputs, the log, the JUnit and JSON reports, the suite's
-diagnostics, the resolved inputs and the qualification result. Jump hosts and
-the SSA issuer are withheld from the text files there, as the workflow
-withholds them from its artifacts. The result is recorded, never published.
+The CDN that holds the OS images refuses networks it does not allow, so those
+locations are asked from the site, through the first jump host reached. The
+registry is asked from here.
+
+Everything the run writes goes to --work-dir, outside the checkout: the plan,
+the e2e config, the site inputs, the log, the JUnit and JSON reports, the
+suite's diagnostics, the resolved inputs and the qualification result. Jump
+hosts and the SSA issuer are withheld from the text files there, as the
+workflow withholds them from its artifacts. The result is recorded, never
+published.
 
 Interrupt with one Ctrl-C. Ginkgo then runs its cleanup, which is what
 releases the node; a second interrupt skips that cleanup and leaks it.
 
---dry-run stops after the checks and the config, printing the commands it
-would run, and takes no machine.`,
-		Example: `  go run ./release/cmd/qualify plan --subject nvke --output plan.json
-  go run ./release/cmd/qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage provision --dry-run
-  go run ./release/cmd/qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full --suite-arg=-ginkgo.focus=tenant`,
+--dry-run makes every check, prints the commands it would run, and takes no
+machine.`,
+		Example: `  qualify local --scope l40s --stage provision --dry-run
+  qualify local --scope l40s --stage provision
+  qualify local --scope golden-path --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full
+  qualify local --plan plan.json --stage full --suite-arg=-ginkgo.focus=tenant`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -88,25 +115,26 @@ would run, and takes no machine.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&o.plan, "plan", "", "the plan to run from (required)")
+	f.StringVar(&o.plan, "plan", "", "a plan to run from, instead of planning here")
+	f.StringVar(&o.scope, "scope", "golden-path", "the scope to plan, a scope from release/policy.yaml")
+	f.StringVar(&o.version, "version", "", "the nvke version to plan (default: the highest)")
+	f.StringVar(&o.resolution, "resolution", resolve.VersionStrategyCommitDescribe, "how the plan resolves components: commitDescribe or gitTag")
 	f.StringVar(&o.combination, "combination", "", "the combination to run (required if the plan has more than one)")
 	f.StringVar(&o.stream, "stream", "", "the stream to run (required if the combination has more than one)")
 	f.StringVar(&o.stage, "stage", "", "how far the site run goes: provision, bootstrap or full (required)")
 	f.StringVar(&o.registry, "registry", "nvcr", "where the site images are pulled from: nvcr or ghcr")
 	f.StringVar(&o.ngcOrg, "ngc-org", os.Getenv("QUALIFY_E2E_NGC_ORG"), "the NGC org the NVCR images are published under")
 	f.StringVar(&o.nodeUser, "node-user", firstEnv("QUALIFY_E2E_NODE_USER", "NODE_USER"), "the account the OS image bakes; empty is the OSS images'")
-	f.StringVar(&o.remote, "remote", "origin", "the remote a missing controller commit or tag is fetched from")
+	f.StringVar(&o.remote, "remote", "origin", "the upstream remote: tags and a missing controller commit come from it, and its size sets the describe length")
 	f.StringVar(&o.workDir, "work-dir", "", "where the run writes everything (default: a new directory under the user cache)")
 	f.StringVar(&o.siteInputs, "site-inputs", "", "where the site inputs are built (default: site-inputs in the work directory)")
 	f.BoolVar(&o.reuseSiteInputs, "reuse-site-inputs", false, "use the archives already in --site-inputs instead of building them")
 	f.BoolVar(&o.keepSite, "keep-site", false, "keep the site node when the run fails; it must then be deleted by hand")
-	f.BoolVar(&o.dryRun, "dry-run", false, "check and print what would run, and take no machine")
+	f.BoolVar(&o.dryRun, "dry-run", false, "make every check and print what would run, and take no machine")
 	f.BoolVar(&o.skipVerify, "skip-verify", false, "do not check the plan's artifacts, for re-running a plan that has already passed the check")
-	f.DurationVar(&o.wait, "wait", 0, "how long to wait for an artifact the plan names that is not published yet")
+	f.DurationVar(&o.wait, "wait", 0, "how long to wait for a registry artifact the plan names that is not published yet")
 	f.StringArrayVar(&o.suiteArgs, "suite-arg", nil, "an extra argument for the suite, after the workflow's own (repeatable)")
-	for _, name := range []string{"plan", "stage"} {
-		_ = cmd.MarkFlagRequired(name)
-	}
+	_ = cmd.MarkFlagRequired("stage")
 	return cmd
 }
 
@@ -125,10 +153,22 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err != nil {
 		return err
 	}
-
-	plan, err := qualification.LoadPlan(o.plan)
+	abbrev, err := remoteAbbrev(ctx, root, o.remote)
 	if err != nil {
-		return fmt.Errorf("--plan: %w", err)
+		return err
+	}
+
+	planPath := o.plan
+	if planPath == "" {
+		step("Planning %s", o.scope)
+		if planPath, err = planHere(ctx, out, root, abbrev, o); err != nil {
+			return err
+		}
+		defer os.Remove(planPath)
+	}
+	plan, err := qualification.LoadPlan(planPath)
+	if err != nil {
+		return fmt.Errorf("the plan: %w", err)
 	}
 	inputs, err := lane.FromPlan(plan, o.combination, o.stream)
 	if err != nil {
@@ -137,6 +177,10 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 
 	workDir, err := makeWorkDir(o.workDir, inputs.Stream, startedAt)
 	if err != nil {
+		return err
+	}
+	keptPlan := filepath.Join(workDir, "plan.json")
+	if err := copyFile(planPath, keptPlan); err != nil {
 		return err
 	}
 	siteInputs := o.siteInputs
@@ -160,17 +204,22 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(out, "\nnvke %s: controller %s, nvkectl %s\n", plan.Version, r.ControllerVersion, r.Inputs.CLI)
 	fmt.Fprintf(out, "stream %s at stage %s, from %s\n", r.Inputs.Stream, r.Stage, root)
 	fmt.Fprintf(out, "work directory %s\n", workDir)
 
 	env := suiteEnv(os.Environ())
 
 	step("Checking what the run needs")
-	if problems := preflight(ctx, root, r, env, o); len(problems) > 0 {
-		for _, p := range problems {
+	c := preflight(ctx, root, r, env, abbrev, o)
+	for _, w := range c.warnings {
+		fmt.Fprintln(out, "  warning:", w)
+	}
+	if len(c.problems) > 0 {
+		for _, p := range c.problems {
 			fmt.Fprintln(out, "  -", p)
 		}
-		return fmt.Errorf("%d problem(s) to fix before a machine is taken", len(problems))
+		return fmt.Errorf("%d problem(s) to fix before a machine is taken", len(c.problems))
 	}
 	fmt.Fprintln(out, "  ok")
 
@@ -188,8 +237,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		fmt.Fprintln(out, "\nnot checking the plan's artifacts (--skip-verify)")
 	} else {
 		step("Checking every artifact the plan names")
-		checker := artifact.Checker{Auth: artifact.EnvAuth(registryCredentials...)}
-		if err := checker.WaitFor(ctx, out, locations(plan), o.wait, artifact.DefaultPoll); err != nil {
+		if err := verifyLocal(ctx, out, env, plan, c.site, o.wait); err != nil {
 			return err
 		}
 	}
@@ -212,9 +260,6 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err := writeResolved(filepath.Join(workDir, "resolved-inputs.json"), o, r, root, head, startedAt); err != nil {
 		return err
 	}
-	if err := copyFile(o.plan, filepath.Join(workDir, "plan.json")); err != nil {
-		return err
-	}
 
 	makeArgs := append([]string{"-C", filepath.Join(root, e2eDir), "site-inputs"}, r.SiteInputsVars()...)
 	goArgs := r.GoTestArgs(reports, o.suiteArgs)
@@ -224,7 +269,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 			fmt.Fprintf(out, "  %smake %s\n", envPrefix(r.SiteInputsEnv()), strings.Join(makeArgs, " "))
 		}
 		fmt.Fprintf(out, "  (cd %s && go %s)\n", filepath.Join(root, e2eDir), strings.Join(goArgs, " "))
-		fmt.Fprintf(out, "\nconfig: %s\n", reports.Config)
+		fmt.Fprintf(out, "\nplan and config: %s\n", workDir)
 		return nil
 	}
 
@@ -271,7 +316,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	result := resultCmd()
 	result.SetOut(out)
 	result.SetArgs([]string{
-		"--plan", o.plan,
+		"--plan", keptPlan,
 		"--report", reports.JSON,
 		"--combination", r.Inputs.Combination,
 		"--stream", r.Inputs.Stream,
@@ -291,68 +336,302 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	return nil
 }
 
+// planHere runs `qualify plan` for the checkout, describing at abbrev, after
+// fetching the remote's tags so the highest version is the remote's.
+func planHere(ctx context.Context, out io.Writer, root string, abbrev int, o localOptions) (string, error) {
+	if err := runCommand(out, root, nil, "git", "fetch", "--quiet", "--tags", o.remote); err != nil {
+		return "", fmt.Errorf("fetching %s's tags: %w", o.remote, err)
+	}
+	fmt.Fprintf(out, "describing commits at %d characters, as a fresh clone of %s does\n", abbrev, o.remote)
+
+	f, err := os.CreateTemp("", "qualify-plan-*.json")
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	args := []string{"--subject", "nvke", "--scope", o.scope, "--resolution", o.resolution, "--root", root, "--output", f.Name()}
+	if o.version != "" {
+		args = append(args, "--version", o.version)
+	}
+
+	restore := withGitConfig("core.abbrev", strconv.Itoa(abbrev))
+	defer restore()
+	plan := planCmd()
+	plan.SetOut(out)
+	plan.SetErr(out)
+	plan.SetArgs(args)
+	if err := plan.ExecuteContext(ctx); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("planning: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// remoteAbbrev is the describe length a fresh clone of remote picks, from
+// the objects its branches and the tags reach.
+func remoteAbbrev(ctx context.Context, root, remote string) (int, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--objects", "--remotes="+remote, "--tags")
+	cmd.Dir = root
+	b, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("counting %s's objects: %w", remote, err)
+	}
+	count := bytes.Count(b, []byte("\n"))
+	if count == 0 {
+		return 0, fmt.Errorf("no objects reachable from %s; is it the upstream remote, and fetched?", remote)
+	}
+	return lane.DescribeAbbrev(count), nil
+}
+
+// withGitConfig sets one git config value for every git this process runs,
+// through git's own environment, and returns what undoes it.
+func withGitConfig(key, value string) func() {
+	prev, had := os.LookupEnv("GIT_CONFIG_COUNT")
+	n, _ := strconv.Atoi(prev)
+	keyVar, valueVar := fmt.Sprintf("GIT_CONFIG_KEY_%d", n), fmt.Sprintf("GIT_CONFIG_VALUE_%d", n)
+	os.Setenv(keyVar, key)
+	os.Setenv(valueVar, value)
+	os.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(n+1))
+	return func() {
+		os.Unsetenv(keyVar)
+		os.Unsetenv(valueVar)
+		if had {
+			os.Setenv("GIT_CONFIG_COUNT", prev)
+		} else {
+			os.Unsetenv("GIT_CONFIG_COUNT")
+		}
+	}
+}
+
+// site is a jump host the run reached, and the login it reached it as.
+type site struct {
+	hostVar, host, login string
+}
+
+func (s site) target() string {
+	if s.login == "" {
+		return s.host
+	}
+	return s.login + "@" + s.host
+}
+
+type checks struct {
+	problems, warnings []string
+	// site is the first jump host reached, which the CDN checks go through.
+	site *site
+}
+
 // preflight is every check that costs seconds and would otherwise fail an
 // hour into a run, all of them, so one pass names every gap.
-func preflight(ctx context.Context, root string, r lane.Run, env []string, o localOptions) []string {
-	var problems []string
-	addf := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+func preflight(ctx context.Context, root string, r lane.Run, env []string, abbrev int, o localOptions) checks {
+	var c checks
+	problem := func(format string, args ...any) { c.problems = append(c.problems, fmt.Sprintf(format, args...)) }
 
+	teleport := firstEnvIn(env, "JUMP_HOST_PASSWORD") == "" && firstEnvIn(env, "TELEPORT_IDENTITY_FILE") == ""
 	tools := []string{"go", "git", "make", "docker"}
 	if r.CLIRef != "" {
 		tools = append(tools, "oras")
 	}
-	teleport := firstEnvIn(env, "JUMP_HOST_PASSWORD") == "" && firstEnvIn(env, "TELEPORT_IDENTITY_FILE") == ""
-	if teleport && !o.dryRun {
+	if teleport {
 		tools = append(tools, "tsh")
 	}
 	for _, tool := range tools {
 		if _, err := exec.LookPath(tool); err != nil {
-			addf("%s is not on PATH", tool)
+			problem("%s is not on PATH", tool)
 		}
 	}
 
-	if r.Inputs.Provider == "forge" {
-		if names := lane.Missing(env, []string{"FORGE_API_KEY"}); len(names) > 0 {
-			addf("FORGE_API_KEY is not set")
-		}
+	if r.Inputs.Provider == "forge" && len(lane.Missing(env, []string{"FORGE_API_KEY"})) > 0 {
+		problem("FORGE_API_KEY is not set")
 	}
-	if o.registry == "nvcr" {
-		if names := lane.Missing(env, []string{"NGC_API_KEY"}); len(names) > 0 {
-			addf("NGC_API_KEY is not set; the plan's NVCR artifacts cannot be checked")
-		}
+	if o.registry == "nvcr" && len(lane.Missing(env, []string{"NGC_API_KEY"})) > 0 {
+		problem("NGC_API_KEY is not set; the plan's NVCR artifacts cannot be checked")
 	}
-	envFile := filepath.Join(root, e2eDir, "environments", r.Environment+".yaml")
-	if b, err := os.ReadFile(envFile); err != nil {
-		addf("reading %s: %v", envFile, err)
-	} else if names := lane.Missing(env, lane.RequiredEnv(b)); len(names) > 0 {
-		addf("environments/%s.yaml needs %s", r.Environment, strings.Join(names, ", "))
+	envFile, err := os.ReadFile(filepath.Join(root, e2eDir, "environments", r.Environment+".yaml"))
+	if err != nil {
+		problem("reading environments/%s.yaml: %v", r.Environment, err)
+	} else if names := lane.Missing(env, lane.RequiredEnv(envFile)); len(names) > 0 {
+		problem("environments/%s.yaml needs %s", r.Environment, strings.Join(names, ", "))
 	}
 
 	for _, name := range leftInE2EDir {
 		if _, err := os.Stat(filepath.Join(root, e2eDir, name)); err == nil {
-			addf("%s/%s is left from an earlier run; move it out of the way", e2eDir, name)
+			problem("%s/%s is left from an earlier run; move it out of the way", e2eDir, name)
 		}
 	}
 
-	if !o.dryRun {
-		if err := quiet(ctx, "docker", "info"); err != nil {
-			addf("docker is not running: %v", err)
-		} else if err := quiet(ctx, "docker", "buildx", "version"); err != nil {
-			addf("docker buildx is not installed: %v", err)
-		} else if !o.reuseSiteInputs {
-			// A docker login, not the NGC_API_KEY verify uses: site-inputs pulls
-			// with docker's own credentials.
-			if err := quiet(ctx, "docker", "manifest", "inspect", r.ProvisionedImage()); err != nil {
-				addf("docker cannot read %s; log in to %s first", r.ProvisionedImage(), strings.SplitN(r.Images, "/", 2)[0])
-			}
+	if o.plan != "" && r.Inputs.ControllerVersionStrategy == resolve.VersionStrategyCommitDescribe {
+		if hash, ok := lane.DescribeHash(r.ControllerVersion); ok && len(hash) != abbrev {
+			problem("the plan names controller %s, a %d-character hash, but a fresh clone of %s describes at %d, which is what the publishers tag; plan here instead (drop --plan)",
+				r.ControllerVersion, len(hash), o.remote, abbrev)
 		}
-		if teleport {
-			if err := quiet(ctx, "tsh", "status"); err != nil {
-				addf("tsh has no valid login; run tsh login --proxy=$TELEPORT_PROXY")
+	}
+
+	if err := quiet(ctx, nil, "docker", "info"); err != nil {
+		problem("docker is not running: %v", err)
+	} else {
+		if err := quiet(ctx, nil, "docker", "buildx", "version"); err != nil {
+			problem("docker buildx is not installed: %v", err)
+		}
+		if !o.reuseSiteInputs {
+			images := []string{r.ProvisionedImage()}
+			if !r.ControllerBuild && o.registry == "nvcr" {
+				images = append([]string{r.ControllerImage()}, images...)
+			}
+			for _, image := range images {
+				if msg := dockerCannotRead(ctx, image); msg != "" {
+					problem("%s", msg)
+				}
 			}
 		}
 	}
-	return problems
+
+	if teleport && envFile != nil {
+		c.checkTeleport(ctx, env, envFile, r.Stage)
+	}
+	return c
+}
+
+// dockerCannotRead says why docker cannot read image's manifest, or "" when
+// it can. site-inputs pulls with docker's own login, not NGC_API_KEY.
+func dockerCannotRead(ctx context.Context, image string) string {
+	err := quiet(ctx, nil, "docker", "manifest", "inspect", image)
+	switch {
+	case err == nil:
+		return ""
+	case strings.Contains(err.Error(), "denied") || strings.Contains(err.Error(), "unauthorized"):
+		return fmt.Sprintf("docker may not read %s. Log in with a key that can: for nvcr.io, an NGC key made in the org the images are published under", image)
+	case strings.Contains(err.Error(), "no such manifest") || strings.Contains(err.Error(), "not found"):
+		return fmt.Sprintf("%s does not exist; check the version the plan names", image)
+	default:
+		return fmt.Sprintf("docker cannot read %s: %v", image, err)
+	}
+}
+
+// checkTeleport checks the login and reaches every jump host that is set, as
+// its login. The first one reached is kept for the CDN checks.
+func (c *checks) checkTeleport(ctx context.Context, env []string, envFile []byte, stage string) {
+	status, err := tshStatus(ctx, env)
+	if err != nil {
+		c.problems = append(c.problems, "tsh has no valid login; run tsh login --proxy=$TELEPORT_PROXY")
+		return
+	}
+	if left := time.Until(status.Active.ValidUntil); left < stageLength[stage] {
+		c.warnings = append(c.warnings, fmt.Sprintf("your Teleport login ends in %s, before a %s run usually does. A tsh login during the run is picked up; to start fresh: tsh logout && tsh login --proxy=$TELEPORT_PROXY",
+			left.Round(time.Minute), stage))
+	}
+
+	set := 0
+	for _, jh := range lane.JumpHosts(envFile) {
+		host := firstEnvIn(env, jh.HostVar)
+		if host == "" {
+			continue
+		}
+		set++
+		login := firstEnvIn(env, jh.LoginVar)
+		if login != "" && !contains(status.Active.Logins, login) {
+			c.problems = append(c.problems, fmt.Sprintf("%s is %q, which is not one of your Teleport logins (%s). It takes the account on the jump host, not your Teleport user",
+				jh.LoginVar, login, strings.Join(status.Active.Logins, ", ")))
+			continue
+		}
+		s := site{hostVar: jh.HostVar, host: host, login: login}
+		if err := quiet(ctx, env, "tsh", "ssh", s.target(), "true"); err != nil {
+			c.problems = append(c.problems, fmt.Sprintf("$%s is not reachable as %q: %s",
+				jh.HostVar, login, strings.ReplaceAll(err.Error(), host, "$"+jh.HostVar)))
+			continue
+		}
+		if c.site == nil {
+			c.site = &s
+		}
+	}
+	if set == 0 {
+		var names []string
+		for _, jh := range lane.JumpHosts(envFile) {
+			names = append(names, jh.HostVar)
+		}
+		c.problems = append(c.problems, fmt.Sprintf("no jump host is set; the stream's site reads one of %s", strings.Join(names, ", ")))
+	}
+}
+
+type tshStatusOutput struct {
+	Active struct {
+		ValidUntil time.Time `json:"valid_until"`
+		Logins     []string  `json:"logins"`
+	} `json:"active"`
+}
+
+func tshStatus(ctx context.Context, env []string) (tshStatusOutput, error) {
+	var status tshStatusOutput
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tsh", "status", "--format=json")
+	cmd.Env = env
+	b, err := cmd.Output()
+	if err != nil {
+		return status, err
+	}
+	if err := json.Unmarshal(b, &status); err != nil {
+		return status, err
+	}
+	if time.Until(status.Active.ValidUntil) <= 0 {
+		return status, errors.New("the login has expired")
+	}
+	return status, nil
+}
+
+// verifyLocal checks every location the plan names: the registry from here,
+// and the CDN from the site when a jump host was reached, since the CDN
+// refuses networks it does not allow and the node is what fetches from it.
+func verifyLocal(ctx context.Context, out io.Writer, env []string, plan *qualification.Plan, s *site, wait time.Duration) error {
+	var registry, web []artifact.Location
+	for _, l := range locations(plan) {
+		if strings.HasPrefix(l.URL, "https://") && s != nil {
+			web = append(web, l)
+		} else {
+			registry = append(registry, l)
+		}
+	}
+
+	var errs []error
+	checker := artifact.Checker{Auth: artifact.EnvAuth(registryCredentials...)}
+	if len(registry) > 0 {
+		if err := checker.WaitFor(ctx, out, registry, wait, artifact.DefaultPoll); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(web) > 0 {
+		fmt.Fprintf(out, "asking the CDN from the site, through $%s:\n", s.hostVar)
+		var missing []string
+		for _, l := range web {
+			code, err := fromSite(ctx, env, *s, l.URL)
+			if err == nil && strings.HasPrefix(code, "2") {
+				fmt.Fprintf(out, "published: %s (%s)\n", l.URL, strings.Join(l.Wanted, ", "))
+				continue
+			}
+			reason := "HTTP " + code
+			if err != nil {
+				reason = strings.ReplaceAll(err.Error(), s.host, "$"+s.hostVar)
+			}
+			missing = append(missing, fmt.Sprintf("  %s (%s): %s from the site", l.URL, strings.Join(l.Wanted, ", "), reason))
+		}
+		if len(missing) > 0 {
+			errs = append(errs, fmt.Errorf("%d of the CDN artifacts the plan names are not published:\n%s", len(missing), strings.Join(missing, "\n")))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// fromSite is the HTTP status the jump host gets for a HEAD of url.
+func fromSite(ctx context.Context, env []string, s site, url string) (string, error) {
+	if strings.ContainsAny(url, "'\\") {
+		return "", fmt.Errorf("refusing to quote %q for a remote shell", url)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tsh", "ssh", s.target(), "curl -s -o /dev/null -w '%{http_code}' -I --max-time 30 '"+url+"'")
+	cmd.Env = env
+	b, err := cmd.Output()
+	return strings.TrimSpace(string(b)), err
 }
 
 // suiteEnv is the shell's environment with TELEPORT_PROXY taken from
@@ -374,7 +653,7 @@ func suiteEnv(environ []string) []string {
 func ghcrControllerRepository(ctx context.Context, r lane.Run) (string, error) {
 	for _, name := range []string{lane.DefaultControllerRepository, "nke-controller"} {
 		image := r.Images + "/" + name + ":" + r.ControllerVersion
-		if quiet(ctx, "docker", "manifest", "inspect", image) == nil {
+		if quiet(ctx, nil, "docker", "manifest", "inspect", image) == nil {
 			return name, nil
 		}
 	}
@@ -385,7 +664,7 @@ func ghcrControllerRepository(ctx context.Context, r lane.Run) (string, error) {
 // present in the checkout: the commit a described version was taken at, or
 // the controller's release tag.
 func ensureControllerTree(ctx context.Context, out io.Writer, root, remote string, r lane.Run, commit string) error {
-	if r.Inputs.ControllerVersionStrategy == "commitDescribe" {
+	if r.Inputs.ControllerVersionStrategy == resolve.VersionStrategyCommitDescribe {
 		if commit == "" {
 			return fmt.Errorf("the controller was described at a commit, but the plan records none")
 		}
@@ -467,11 +746,15 @@ func writeResolved(path string, o localOptions, r lane.Run, root, head string, a
 		StartedAt string   `json:"startedAt"`
 		Checkout  string   `json:"checkout"`
 		Head      string   `json:"head"`
-		Plan      string   `json:"plan"`
+		Plan      string   `json:"plan,omitempty"`
+		Scope     string   `json:"scope,omitempty"`
 		Registry  string   `json:"registry"`
 		SuiteArgs []string `json:"suiteArgs,omitempty"`
 		Run       lane.Run `json:"run"`
-	}{at.Format(time.RFC3339), root, head, o.plan, o.registry, o.suiteArgs, r}
+	}{at.Format(time.RFC3339), root, head, o.plan, "", o.registry, o.suiteArgs, r}
+	if o.plan == "" {
+		record.Scope = o.scope
+	}
 	b, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
@@ -512,10 +795,14 @@ func runCommand(out io.Writer, dir string, env []string, name string, args ...st
 	return cmd.Run()
 }
 
-func quiet(ctx context.Context, name string, args ...string) error {
+// quiet runs a short check, in env when it is not nil, and reports its first
+// line of output on failure.
+func quiet(ctx context.Context, env []string, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = env
+	b, err := cmd.CombinedOutput()
 	if err != nil {
 		if line := firstLine(string(b)); line != "" {
 			return fmt.Errorf("%w: %s", err, line)
@@ -563,7 +850,8 @@ func firstEnv(names ...string) string {
 	return firstEnvIn(os.Environ(), names...)
 }
 
-// firstEnvIn is the value of the first of names set non-empty in environ.
+// firstEnvIn is the value of the first of names set non-empty in environ,
+// taking the last assignment of each as a shell would.
 func firstEnvIn(environ []string, names ...string) string {
 	for _, name := range names {
 		prefix := name + "="

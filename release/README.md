@@ -163,10 +163,10 @@ $ go run ./release/cmd/qualify plan --subject nvke --version v0.21.0 --scope ful
 
 ## Running a stream from a workstation
 
-`qualify local` runs one stream of a plan on the hardware lane the way one leg
-of the `qualify-e2e` workflow does, with the credentials in your shell instead
-of the workflow's. It is the way to run the lane against code that is not on
-`main`, such as a pull request from a fork, which the workflow cannot run.
+`qualify local` runs one stream on the hardware lane the way one leg of the
+`qualify-e2e` workflow does, with the credentials in your shell instead of the
+workflow's. It is the way to run the lane against code that is not on `main`,
+such as a pull request from a fork, which the workflow cannot run.
 
 Run it from the root of the checkout under test, since that is the suite it
 compiles. A binary built from one checkout can run another:
@@ -175,42 +175,58 @@ compiles. A binary built from one checkout can run another:
 $ go build -o ~/bin/qualify ./release/cmd/qualify
 $ cd <the checkout under test>
 
-# Check everything and print what would run; takes no machine
-$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage provision --dry-run
+# Plan, check everything, and print what would run; takes no machine
+$ qualify local --scope l40s --stage provision --dry-run
 
 # Take a node, reach it, release it
-$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage provision
+$ qualify local --scope l40s --stage provision
 
 # The whole lane, focused on the tenant
-$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full \
+$ qualify local --scope golden-path --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full \
     --suite-arg=-ginkgo.focus=tenant
 ```
 
-It does what the workflow's `qualify-run` job does, in the same order:
+It does what the workflow's `plan` and `qualify-run` jobs do, in the same order:
 
-1. Checks what the run needs, and names every gap at once before a machine is
-   taken. That covers:
-   - `FORGE_API_KEY`;
-   - `NGC_API_KEY` and a docker login for `--registry nvcr`;
+1. Plans `--scope` at `--version` (default the highest), after fetching the
+   remote's tags. Pass `--plan` to run from a plan made elsewhere instead.
+2. Checks what the run needs, and names every gap at once before a machine is
+   taken. A dry run makes every check too. That covers:
+   - `FORGE_API_KEY`, and `NGC_API_KEY` for `--registry nvcr`;
    - every `${NAME}` that `environments/<provider>.yaml` requires;
-   - a valid `tsh` login, unless `TELEPORT_IDENTITY_FILE` or `JUMP_HOST_PASSWORD` is set;
-   - the tools on `PATH`: `go`, `git`, `make`, `docker` with buildx, and `oras` when nvkectl is published;
+   - that docker can read the images the site inputs pull, telling a key that
+     may not read them from a tag that does not exist;
+   - a `tsh` login, unless `TELEPORT_IDENTITY_FILE` or `JUMP_HOST_PASSWORD` is
+     set, that each jump host set is reached as its login, and a warning when
+     the login ends before the stage usually does;
+   - for `--plan`, that the plan describes commits at the length the publishers do;
+   - the tools on `PATH`: `go`, `git`, `make`, `docker` with buildx, `tsh`, and `oras` when nvkectl is published;
    - nothing left in `controller/test/e2e` by an earlier run.
-2. Runs `qualify verify` on the plan, unless `--skip-verify` is passed.
-3. Fetches the controller's commit or release tag when the checkout lacks it,
+3. Checks every artifact the plan names, unless `--skip-verify` is passed.
+   Registry artifacts are asked from here. The CDN that holds the OS images
+   refuses networks it does not allow, so those are asked from the site,
+   through the first jump host reached.
+4. Fetches the controller's commit or release tag when the checkout lacks it,
    since the deploy path is exported from that tree.
-4. Builds the site inputs with `make -C controller/test/e2e site-inputs`.
-5. Writes the e2e config and runs the suite with the workflow's flags and
+5. Builds the site inputs with `make -C controller/test/e2e site-inputs`.
+6. Writes the e2e config and runs the suite with the workflow's flags and
    timeouts. On macOS, `caffeinate` holds off sleep for the length of the run.
-6. Moves what the suite left in its directory into the work directory. It then
+7. Moves what the suite left in its directory into the work directory. It then
    withholds every `*_JUMP_HOST` and `SSA_ISSUER` value from the text files
    there, and records the result with `qualify result`. Nothing is published.
 
+A plan made here describes each commit at the length a fresh clone of
+`--remote` does, from the number of objects that remote's branches and tags
+reach. That clone is what the publishers tag from. A clone with more objects,
+forks fetched for one, would otherwise describe the same commit with one more
+hex digit, and name artifacts that do not exist.
+
 Teleport uses your own login: the suite's dialer falls back to the `tsh`
 profile when `TELEPORT_IDENTITY_FILE` is unset, and `TELEPORT_PROXY` is taken
-from `FORGE_TELEPORT_PROXY` when only that is set. A person's role may grant a
-different login on the jump host from the bot's `root`, so set
-`FORGE_TELEPORT_LOGIN` (and `FORGE_SITE_2_TELEPORT_LOGIN`) to yours.
+from `FORGE_TELEPORT_PROXY` when only that is set. Set `FORGE_TELEPORT_LOGIN`
+(and `FORGE_SITE_2_TELEPORT_LOGIN`) to the account you are granted on the jump
+host, one of the Logins `tsh status` lists. It is not your Teleport user name,
+and a person's role may not grant the bot's `root`.
 
 Interrupt it with one Ctrl-C. Ginkgo then runs its cleanup, which is what
 releases the node. A second interrupt skips that cleanup and leaks the node.
@@ -219,8 +235,10 @@ If a run dies before its teardown, the site node is the Forge instance labelled
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--plan` | required | The plan to run from |
 | `--stage` | required | `provision`, `bootstrap` or `full`, as `-e2e.site-stage` |
+| `--scope`, `--version` | `golden-path`, the highest | What to plan: a scope from `release/policy.yaml`, at an nvke version |
+| `--resolution` | `commitDescribe` | How the plan resolves components, `commitDescribe` or `gitTag` |
+| `--plan` | plan here | A plan to run from instead |
 | `--stream`, `--combination` | the only one | Which stream of which combination to run |
 | `--registry` | `nvcr` | Where the site images are pulled from, `nvcr` or `ghcr` |
 | `--ngc-org` | `QUALIFY_E2E_NGC_ORG` | The org the NVCR images are published under |
@@ -229,9 +247,9 @@ If a run dies before its teardown, the site node is the Forge instance labelled
 | `--site-inputs`, `--reuse-site-inputs` | the work directory, off | Where the site inputs are built, and whether to reuse archives already there |
 | `--keep-site` | off | Keep the site node when the run fails. It must then be deleted by hand |
 | `--suite-arg` | none | An extra suite argument after the workflow's own, repeatable |
-| `--wait`, `--skip-verify` | `0`, off | How long `verify` waits for an unpublished artifact, or whether to skip it |
-| `--remote` | `origin` | Where a missing controller commit or tag is fetched from |
-| `--dry-run` | off | Check and print what would run, and take no machine |
+| `--wait`, `--skip-verify` | `0`, off | How long to wait for an unpublished registry artifact, or whether to skip the artifact check |
+| `--remote` | `origin` | The upstream: its tags are planned from, its size sets the describe length, and a missing controller commit is fetched from it |
+| `--dry-run` | off | Plan, make every check, print what would run, and take no machine |
 
 The work directory holds the following, all mode 0600:
 

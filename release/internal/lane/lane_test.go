@@ -298,6 +298,48 @@ func TestRequiredEnvReadsTheForgeEnvironment(t *testing.T) {
 	}
 }
 
+func TestJumpHosts(t *testing.T) {
+	b, err := os.ReadFile("../../../controller/test/e2e/environments/forge.yaml")
+	if err != nil {
+		t.Skip(err)
+	}
+	want := []JumpHost{
+		{HostVar: "FORGE_JUMP_HOST", LoginVar: "FORGE_TELEPORT_LOGIN"},
+		{HostVar: "FORGE_SITE_2_JUMP_HOST", LoginVar: "FORGE_SITE_2_TELEPORT_LOGIN"},
+	}
+	if got := JumpHosts(b); !reflect.DeepEqual(got, want) {
+		t.Errorf("forge.yaml jump hosts %v", got)
+	}
+	if got := JumpHosts([]byte(`jumpHost: "${A_JUMP_HOST:-}"`)); !reflect.DeepEqual(got, []JumpHost{{HostVar: "A_JUMP_HOST"}}) {
+		t.Errorf("a site with no login %v", got)
+	}
+}
+
+// The two counts measured on 2026-10-29: a fresh clone of origin, which is
+// what the publishers describe in, and a developer's clone with forks fetched.
+func TestDescribeAbbrevMatchesGit(t *testing.T) {
+	for count, want := range map[int]int{0: 7, 5000: 7, 16384: 8, 56652: 8, 65535: 8, 65536: 9, 96037: 9, 1 << 20: 11} {
+		if got := DescribeAbbrev(count); got != want {
+			t.Errorf("DescribeAbbrev(%d) = %d, want %d", count, got, want)
+		}
+	}
+}
+
+func TestDescribeHash(t *testing.T) {
+	for version, want := range map[string]string{
+		"v0.2.0-98-g2cfd0008":       "2cfd0008",
+		"v0.3.0-rc.2-67-g2cfd00081": "2cfd00081",
+		"v0.2.0":                    "",
+		"v0.2.0-rc.1":               "",
+		"v1.0.0-gpu-g2":             "",
+	} {
+		got, ok := DescribeHash(version)
+		if got != want || ok != (want != "") {
+			t.Errorf("DescribeHash(%q) = %q, %v", version, got, ok)
+		}
+	}
+}
+
 func TestWithhold(t *testing.T) {
 	values := Withheld([]string{
 		"FORGE_JUMP_HOST=jump.example.test",
