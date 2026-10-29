@@ -13,8 +13,10 @@ The code it describes lives in `controller/test/e2e/`, and paths below are
 relative to the repository root.
 
 Alongside this: [environments.md](environments.md) for declaring the hardware
-a run can execute against, and [triage.md](triage.md) for working out whether
-a red run is our defect or the site's.
+a run can execute against, [triage.md](triage.md) for working out whether
+a red run is our defect or the site's, and
+[running-from-a-fork.md](running-from-a-fork.md) for running the lane from a
+workstation.
 
 ## What this part of the workflow is called
 

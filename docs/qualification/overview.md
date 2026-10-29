@@ -193,6 +193,7 @@ through create, node readiness, and delete.
 | [hardware-lane.md](hardware-lane.md) | you want to know how a run works, step by step, and what it deliberately does not cover |
 | [environments.md](environments.md) | you are adding a site, an instance type, or a second infrastructure provider |
 | [triage.md](triage.md) | a run went red and you need to know whether it is ours or the site's |
+| [running-from-a-fork.md](running-from-a-fork.md) | you want to run the lane yourself, from a workstation, against a fork's branch |
 
 Related, outside this directory:
 

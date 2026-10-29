@@ -829,7 +829,9 @@ the environment.
 
 To run what one leg of the `qualify-e2e` workflow runs, from a plan and with
 your own credentials, use `qualify local`; see
-[Running a stream from a workstation](../../../release/README.md#running-a-stream-from-a-workstation).
+[Running the hardware lane from a fork](../../../docs/qualification/running-from-a-fork.md),
+and [Running a stream from a workstation](../../../release/README.md#running-a-stream-from-a-workstation)
+for its flags.
 It does everything below for you and checks the prerequisites before a machine
 is taken. The rest of this section is what it does by hand.
 

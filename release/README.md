@@ -166,7 +166,9 @@ $ go run ./release/cmd/qualify plan --subject nvke --version v0.21.0 --scope ful
 `qualify local` runs one stream on the hardware lane the way one leg of the
 `qualify-e2e` workflow does, with the credentials in your shell instead of the
 workflow's. It is the way to run the lane against code that is not on `main`,
-such as a pull request from a fork, which the workflow cannot run.
+such as a pull request from a fork, which the workflow cannot run. For a
+walkthrough, from setup to a finished run, see
+[Running the hardware lane from a fork](../docs/qualification/running-from-a-fork.md).
 
 Run it from the root of the checkout under test, since that is the suite it
 compiles. A binary built from one checkout can run another:
@@ -192,37 +194,17 @@ $ qualify local --scope l40s --stage full --build changed
 ### Building from the checkout
 
 Without `--build`, a run stages the published artifacts the plan names, so a
-fork's run tests the fork's suite against the published product.
-`--build` builds components from the checkout instead and stages those:
+fork's run tests the fork's suite against the published product. `--build`
+builds `controller`, `cli` or `capi-provisioned` from the checkout and stages
+those instead. `--build changed` builds whichever of them the checkout changes
+since the commit the plan resolved. Each build is tagged with the checkout's
+commit, so what it reads has to be committed. The controller builds for amd64
+only, and the OS image cannot be built here. The result records each built
+component with version strategy `checkout` and no location.
 
-- `controller` is the controller image. Its deploy path, the release manifests
-  and charts the bootstrap installs, comes along, since the suite exports the
-  deploy path from the commit the controller version names.
-- `cli` is `nvkectl`.
-- `capi-provisioned` is the cluster-api-provider-provisioned image.
-- `changed` builds whichever of those the checkout changes since the commit
-  the plan resolved, counting uncommitted changes. A change to `controller/api/`,
-  `controller/deploy/charts/` or `management-engine/` builds both the controller
-  and `nvkectl`, because both import them. Changes under `controller/test/`
-  build nothing: the suite is always compiled from the checkout.
-
-Each build is tagged with the checkout's 12-character commit, and the suite is
-told to expect that version. So everything a build reads has to be committed.
-Preflight refuses a run with uncommitted changes there, because the image
-would carry them and the deploy path, exported from the commit, would not.
-Commit them on a branch, or stash them.
-
-Some things cannot be built here:
-
-- The controller image builds for amd64 only, so an arm64 stream needs the
-  published one. `capi-provisioned` builds for either architecture.
-- The OS image, and the node and SPIRE agents in it, are booted from the CDN.
-  `changed` warns when `agent/`, `os-image/` or `nktp/` differ, because the
-  node runs the published build of them.
-
-The result records each built component with version strategy `checkout`, the
-commit as its version, and no location. The work directory keeps the plan as
-resolved in `plan.json`, and the plan as run in `plan-as-run.json`.
+[Running the hardware lane from a fork](../docs/qualification/running-from-a-fork.md)
+covers how `changed` maps paths to builds, the setup a run needs, and
+troubleshooting.
 
 It does what the workflow's `plan` and `qualify-run` jobs do, in the same order:
 
