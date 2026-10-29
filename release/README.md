@@ -184,7 +184,45 @@ $ qualify local --scope l40s --stage provision
 # The whole lane, focused on the tenant
 $ qualify local --scope golden-path --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full \
     --suite-arg=-ginkgo.focus=tenant
+
+# The whole lane, with what this checkout changes built and staged
+$ qualify local --scope l40s --stage full --build changed
 ```
+
+### Building from the checkout
+
+Without `--build`, a run stages the published artifacts the plan names, so a
+fork's run tests the fork's suite against the published product.
+`--build` builds components from the checkout instead and stages those:
+
+- `controller` is the controller image. Its deploy path, the release manifests
+  and charts the bootstrap installs, comes along, since the suite exports the
+  deploy path from the commit the controller version names.
+- `cli` is `nvkectl`.
+- `capi-provisioned` is the cluster-api-provider-provisioned image.
+- `changed` builds whichever of those the checkout changes since the commit
+  the plan resolved, counting uncommitted changes. A change to `controller/api/`,
+  `controller/deploy/charts/` or `management-engine/` builds both the controller
+  and `nvkectl`, because both import them. Changes under `controller/test/`
+  build nothing: the suite is always compiled from the checkout.
+
+Each build is tagged with the checkout's 12-character commit, and the suite is
+told to expect that version. So everything a build reads has to be committed.
+Preflight refuses a run with uncommitted changes there, because the image
+would carry them and the deploy path, exported from the commit, would not.
+Commit them on a branch, or stash them.
+
+Some things cannot be built here:
+
+- The controller image builds for amd64 only, so an arm64 stream needs the
+  published one. `capi-provisioned` builds for either architecture.
+- The OS image, and the node and SPIRE agents in it, are booted from the CDN.
+  `changed` warns when `agent/`, `os-image/` or `nktp/` differ, because the
+  node runs the published build of them.
+
+The result records each built component with version strategy `checkout`, the
+commit as its version, and no location. The work directory keeps the plan as
+resolved in `plan.json`, and the plan as run in `plan-as-run.json`.
 
 It does what the workflow's `plan` and `qualify-run` jobs do, in the same order:
 
@@ -202,13 +240,15 @@ It does what the workflow's `plan` and `qualify-run` jobs do, in the same order:
    - for `--plan`, that the plan describes commits at the length the publishers do;
    - the tools on `PATH`: `go`, `git`, `make`, `docker` with buildx, `tsh`, and `oras` when nvkectl is published;
    - nothing left in `controller/test/e2e` by an earlier run.
-3. Checks every artifact the plan names, unless `--skip-verify` is passed.
+3. Checks every artifact the plan names that the run does not build, unless
+   `--skip-verify` is passed.
    Registry artifacts are asked from here. The CDN that holds the OS images
    refuses networks it does not allow, so those are asked from the site,
    through the first jump host reached.
 4. Fetches the controller's commit or release tag when the checkout lacks it,
    since the deploy path is exported from that tree.
-5. Builds the site inputs with `make -C controller/test/e2e site-inputs`.
+5. Builds the site inputs with `make -C controller/test/e2e site-inputs`,
+   building what `--build` names and pulling the rest.
 6. Writes the e2e config and runs the suite with the workflow's flags and
    timeouts. On macOS, `caffeinate` holds off sleep for the length of the run.
 7. Moves what the suite left in its directory into the work directory. It then
@@ -240,6 +280,7 @@ If a run dies before its teardown, the site node is the Forge instance labelled
 | `--resolution` | `commitDescribe` | How the plan resolves components, `commitDescribe` or `gitTag` |
 | `--plan` | plan here | A plan to run from instead |
 | `--stream`, `--combination` | the only one | Which stream of which combination to run |
+| `--build` | none | Components to build from the checkout instead of staging the published ones: `controller`, `cli`, `capi-provisioned`, or `changed`. Repeatable or comma-separated; see [Building from the checkout](#building-from-the-checkout) |
 | `--registry` | `nvcr` | Where the site images are pulled from, `nvcr` or `ghcr` |
 | `--ngc-org` | `QUALIFY_E2E_NGC_ORG` | The org the NVCR images are published under |
 | `--controller-name` | read from the deploy path | The namespace and Service the controller is installed under, passed as `NVKE_CONTROLLER_NAMESPACE` and `NVKE_CONTROLLER_SERVICE`. Read from `deploy/nico/controller/release.yaml` at the controller's commit, so a controller from before the rename gets `nke-controller`; a name already set in the shell is left alone |
@@ -255,7 +296,7 @@ If a run dies before its teardown, the site node is the Forge instance labelled
 The work directory holds the following, all mode 0600:
 
 - `e2e-config.yaml`;
-- `plan.json`;
+- `plan.json`, and `plan-as-run.json` when the run builds anything;
 - `resolved-inputs.json`, what the run resolved;
 - `qualify-e2e.log`, the run log;
 - the JUnit and JSON reports;

@@ -165,8 +165,11 @@ type Options struct {
 	// KeepSite holds the site node on failure.
 	KeepSite bool
 	// Head is the checkout's commit, abbreviated to twelve characters. It
-	// tags a controller or nvkectl the plan leaves to be built.
+	// tags whatever is built from the checkout.
 	Head string
+	// Build is what to build from the checkout even though the plan names a
+	// published version of it.
+	Build Build
 	// RepoRoot is the checkout, where a built nvkectl lands.
 	RepoRoot string
 	// SiteInputs is where site-inputs writes nvkectl and the image archives.
@@ -203,6 +206,9 @@ type Run struct {
 	// NVKECTL is where the staged nvkectl ends up.
 	NVKECTL string `json:"nvkectl"`
 
+	ProvisionedVersion string `json:"provisionedVersion"`
+	ProvisionedBuild   bool   `json:"provisionedBuild"`
+
 	NodeUser   string `json:"nodeUser,omitempty"`
 	KeepSite   bool   `json:"keepSite"`
 	SiteInputs string `json:"siteInputs"`
@@ -237,15 +243,23 @@ func Resolve(in Inputs, o Options) (Run, error) {
 		return Run{}, fmt.Errorf("arch is %s, which is neither amd64 nor arm64", r.Arch)
 	}
 
-	r.ControllerVersion, r.ControllerBuild = in.Controller, in.Controller == ""
+	r.ControllerVersion, r.ControllerBuild = in.Controller, in.Controller == "" || o.Build.Controller
 	if r.ControllerBuild {
 		if o.Head == "" {
-			return Run{}, fmt.Errorf("the plan names no controller version, so it is built from the checkout, and the checkout's commit is unknown")
+			return Run{}, fmt.Errorf("the controller is built from the checkout, and the checkout's commit is unknown")
 		}
 		if r.Arch != "amd64" {
-			return Run{}, fmt.Errorf("arch=%s needs a controller version in the plan: building the controller image here is amd64-only", r.Arch)
+			return Run{}, fmt.Errorf("arch=%s needs a published controller: building the controller image here is amd64-only", r.Arch)
 		}
 		r.ControllerVersion = o.Head
+	}
+
+	r.ProvisionedVersion, r.ProvisionedBuild = in.CAPIProvisioned, o.Build.CAPIProvisioned
+	if r.ProvisionedBuild {
+		if o.Head == "" {
+			return Run{}, fmt.Errorf("capi-provisioned is built from the checkout, and the checkout's commit is unknown")
+		}
+		r.ProvisionedVersion = o.Head
 	}
 
 	switch in.Provider {
@@ -280,10 +294,10 @@ func Resolve(in Inputs, o Options) (Run, error) {
 		return Run{}, fmt.Errorf("image registry %q is not ghcr or nvcr", o.Registry)
 	}
 
-	r.CLIVersion, r.CLIBuild = in.CLI, in.CLI == ""
+	r.CLIVersion, r.CLIBuild = in.CLI, in.CLI == "" || o.Build.CLI
 	if r.CLIBuild {
 		if o.Head == "" {
-			return Run{}, fmt.Errorf("the plan names no cli version, so nvkectl is built from the checkout, and the checkout's commit is unknown")
+			return Run{}, fmt.Errorf("nvkectl is built from the checkout, and the checkout's commit is unknown")
 		}
 		r.CLIVersion = o.Head
 		r.NVKECTL = o.RepoRoot + "/cli/dist/nvkectl-linux-" + r.Arch
@@ -341,9 +355,9 @@ func (r Run) ControllerImage() string {
 	return r.Images + "/" + r.ControllerRepository + ":" + r.ControllerVersion
 }
 
-// ProvisionedImage is the capi-provisioned image site-inputs pulls.
+// ProvisionedImage is the capi-provisioned image site-inputs pulls or builds.
 func (r Run) ProvisionedImage() string {
-	return r.Images + "/cluster-api-provider-provisioned:" + r.Inputs.CAPIProvisioned
+	return r.Images + "/cluster-api-provider-provisioned:" + r.ProvisionedVersion
 }
 
 // SiteInputsVars are the make variables the "Build the site inputs" step
@@ -357,7 +371,8 @@ func (r Run) SiteInputsVars() []string {
 		"SITE_CLI_BUILD=" + bit(r.CLIBuild),
 		"SITE_CLI_VERSION=" + r.CLIVersion,
 		"SITE_IMAGE_REGISTRY=" + r.Images,
-		"SITE_PROVISIONED_VERSION=" + r.Inputs.CAPIProvisioned,
+		"SITE_PROVISIONED_VERSION=" + r.ProvisionedVersion,
+		"SITE_PROVISIONED_BUILD=" + bit(r.ProvisionedBuild),
 		"SITE_INPUTS=" + r.SiteInputs,
 	}
 }
@@ -403,7 +418,7 @@ site:
 // node's.
 func (r Run) Versions() string {
 	return "controller=" + r.ControllerVersion + ",cli=" + r.CLIVersion +
-		",capi-provisioned=" + r.Inputs.CAPIProvisioned + "," + r.NodeVersions
+		",capi-provisioned=" + r.ProvisionedVersion + "," + r.NodeVersions
 }
 
 // Reports are where the suite writes what it reports.

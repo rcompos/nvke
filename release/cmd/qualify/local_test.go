@@ -5,12 +5,14 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dsx-ai-factory/nvke/release/internal/lane"
 	"github.com/dsx-ai-factory/nvke/release/internal/qualification"
 )
 
@@ -93,6 +95,58 @@ func TestControllerNameComesFromTheDeployPath(t *testing.T) {
 	}
 	if name, _, err := controllerName(t.Context(), root, "HEAD", []string{"CWE_NAMESPACE=mine"}, ""); name != "" || err != nil {
 		t.Errorf("a name the shell set was overridden with %q, %v", name, err)
+	}
+}
+
+func TestBuildChangedComparesWithThePlannedCommit(t *testing.T) {
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := gitOutput(t.Context(), root, append([]string{"-c", "user.name=t", "-c", "user.email=t@example.test"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	write := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, path), []byte(path), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "--quiet")
+	write("README.md")
+	git("add", ".")
+	git("commit", "--quiet", "-m", "base")
+	base := git("rev-parse", "HEAD")
+	write("cli/main.go")
+	write("os-image/build.sh")
+	git("add", ".")
+	git("commit", "--quiet", "-m", "change")
+	// Uncommitted, and still a change from the plan's commit.
+	write("cluster-api-provider-provisioned/main.go")
+	git("add", ".")
+
+	var out strings.Builder
+	got, err := chooseBuild(t.Context(), &out, root, base, []string{"changed", "controller"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (lane.Build{Controller: true, CLI: true, CAPIProvisioned: true}); got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	if !strings.Contains(out.String(), "os-image/ changed") {
+		t.Errorf("the OS image change is not named:\n%s", out.String())
+	}
+
+	if _, err := chooseBuild(t.Context(), io.Discard, root, "", []string{"changed"}); err == nil {
+		t.Error("changed was accepted with no planned commit")
+	}
+	if got, err := chooseBuild(t.Context(), io.Discard, root, "", []string{"cli"}); err != nil || got != (lane.Build{CLI: true}) {
+		t.Errorf("a named component needs no commit: %+v, %v", got, err)
 	}
 }
 

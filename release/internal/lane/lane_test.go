@@ -165,6 +165,7 @@ func TestResolveRefusesBeforeAMachineIsTaken(t *testing.T) {
 	}{
 		"unknown stage":          {func(_ *Inputs, o *Options) { o.Stage = "tenant" }, "stage"},
 		"arm64 controller build": {func(i *Inputs, _ *Options) { i.Controller = "" }, "amd64-only"},
+		"arm64 controller asked": {func(_ *Inputs, o *Options) { o.Build.Controller = true }, "amd64-only"},
 		"bad arch":               {func(i *Inputs, _ *Options) { i.Arch = "riscv64" }, "neither amd64 nor arm64"},
 		"no provider":            {func(i *Inputs, _ *Options) { i.Provider = "" }, "no provider"},
 		"unknown provider":       {func(i *Inputs, _ *Options) { i.Provider = "aws" }, "no environment file"},
@@ -200,6 +201,7 @@ func TestSiteInputsVars(t *testing.T) {
 		"SITE_CLI_VERSION=v0.3.0-rc.2-67-gabc",
 		"SITE_IMAGE_REGISTRY=nvcr.io/org",
 		"SITE_PROVISIONED_VERSION=v0.2.0-98-gabc",
+		"SITE_PROVISIONED_BUILD=0",
 		"SITE_INPUTS=/inputs",
 	}
 	if got := r.SiteInputsVars(); !reflect.DeepEqual(got, want) {

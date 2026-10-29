@@ -51,7 +51,7 @@ type localOptions struct {
 	keepSite, dryRun                 bool
 	reuseSiteInputs, skipVerify      bool
 	wait                             time.Duration
-	suiteArgs                        []string
+	suiteArgs, build                 []string
 }
 
 func localCmd() *cobra.Command {
@@ -87,6 +87,16 @@ at once:
                            tsh status lists, not the Teleport user
   go, git, make, and oras when nvkectl is published
 
+--build builds components from the checkout and stages them in place of the
+published ones the plan names, so a fork's own changes are what the node runs:
+controller, cli and capi-provisioned by name, or changed for whichever of them
+the checkout changes since the commit the plan resolved. Each is tagged with
+the checkout's commit, so what it builds from has to be committed: the
+controller's deploy path is exported from that commit, not the working tree.
+The controller builds for amd64 only. The OS image, and the agents in it,
+cannot be built here; changed names them when they differ. The result records
+each built component with version strategy checkout and no location.
+
 The CDN that holds the OS images refuses networks it does not allow, so those
 locations are asked from the site, through the first jump host reached. The
 registry is asked from here.
@@ -105,6 +115,7 @@ releases the node; a second interrupt skips that cleanup and leaks it.
 machine.`,
 		Example: `  qualify local --scope l40s --stage provision --dry-run
   qualify local --scope l40s --stage provision
+  qualify local --scope l40s --stage full --build changed
   qualify local --scope golden-path --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full
   qualify local --plan plan.json --stage full --suite-arg=-ginkgo.focus=tenant`,
 		Args:         cobra.NoArgs,
@@ -134,6 +145,7 @@ machine.`,
 	f.BoolVar(&o.dryRun, "dry-run", false, "make every check and print what would run, and take no machine")
 	f.BoolVar(&o.skipVerify, "skip-verify", false, "do not check the plan's artifacts, for re-running a plan that has already passed the check")
 	f.DurationVar(&o.wait, "wait", 0, "how long to wait for a registry artifact the plan names that is not published yet")
+	f.StringSliceVar(&o.build, "build", nil, "components to build from the checkout instead of staging the published ones: controller, cli, capi-provisioned, or changed (repeatable, or comma-separated)")
 	f.StringArrayVar(&o.suiteArgs, "suite-arg", nil, "an extra argument for the suite, after the workflow's own (repeatable)")
 	_ = cmd.MarkFlagRequired("stage")
 	return cmd
@@ -175,6 +187,10 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err != nil {
 		return err
 	}
+	build, err := chooseBuild(ctx, out, root, plan.Commit, o.build)
+	if err != nil {
+		return err
+	}
 
 	workDir, err := makeWorkDir(o.workDir, inputs.Stream, startedAt)
 	if err != nil {
@@ -199,13 +215,29 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		NodeUser:   o.nodeUser,
 		KeepSite:   o.keepSite,
 		Head:       head,
+		Build:      build,
 		RepoRoot:   root,
 		SiteInputs: siteInputs,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\nnvke %s: controller %s, nvkectl %s\n", plan.Version, r.ControllerVersion, r.Inputs.CLI)
+	runPlan, err := lane.AsRun(plan, r)
+	if err != nil {
+		return err
+	}
+	resultPlan := keptPlan
+	built := builtHere(r)
+	if len(built.Names()) > 0 {
+		resultPlan = filepath.Join(workDir, "plan-as-run.json")
+		if err := writeJSON(resultPlan, runPlan); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(out, "\nnvke %s: controller %s, nvkectl %s, capi-provisioned %s\n", plan.Version, r.ControllerVersion, r.CLIVersion, r.ProvisionedVersion)
+	if names := built.Names(); len(names) > 0 {
+		fmt.Fprintf(out, "built from the checkout at %s: %s\n", head, strings.Join(names, ", "))
+	}
 	fmt.Fprintf(out, "stream %s at stage %s, from %s\n", r.Inputs.Stream, r.Stage, root)
 	fmt.Fprintf(out, "work directory %s\n", workDir)
 
@@ -238,7 +270,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		fmt.Fprintln(out, "\nnot checking the plan's artifacts (--skip-verify)")
 	} else {
 		step("Checking every artifact the plan names")
-		if err := verifyLocal(ctx, out, env, plan, c.site, o.wait); err != nil {
+		if err := verifyLocal(ctx, out, env, runPlan, c.site, o.wait); err != nil {
 			return err
 		}
 	}
@@ -332,7 +364,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	result := resultCmd()
 	result.SetOut(out)
 	result.SetArgs(append([]string{
-		"--plan", keptPlan,
+		"--plan", resultPlan,
 		"--report", reports.JSON,
 		"--combination", r.Inputs.Combination,
 		"--stream", r.Inputs.Stream,
@@ -476,6 +508,14 @@ func preflight(ctx context.Context, root string, r lane.Run, env []string, abbre
 		problem("environments/%s.yaml needs %s", r.Environment, strings.Join(names, ", "))
 	}
 
+	if paths := lane.BuildPaths(builtHere(r)); len(paths) > 0 {
+		if dirty, err := gitOutput(ctx, root, append([]string{"status", "--porcelain", "--"}, paths...)...); err != nil {
+			problem("checking the checkout is committed: %v", err)
+		} else if dirty != "" {
+			problem("what the run builds has uncommitted changes, and the build is tagged with the commit, which does not have them. Commit or stash them first:\n%s", indent(dirty))
+		}
+	}
+
 	for _, name := range leftInE2EDir {
 		if _, err := os.Stat(filepath.Join(root, e2eDir, name)); err == nil {
 			problem("%s/%s is left from an earlier run; move it out of the way", e2eDir, name)
@@ -496,9 +536,12 @@ func preflight(ctx context.Context, root string, r lane.Run, env []string, abbre
 			problem("docker buildx is not installed: %v", err)
 		}
 		if !o.reuseSiteInputs {
-			images := []string{r.ProvisionedImage()}
+			var images []string
 			if !r.ControllerBuild && o.registry == "nvcr" {
-				images = append([]string{r.ControllerImage()}, images...)
+				images = append(images, r.ControllerImage())
+			}
+			if !r.ProvisionedBuild {
+				images = append(images, r.ProvisionedImage())
 			}
 			for _, image := range images {
 				if msg := dockerCannotRead(ctx, image); msg != "" {
@@ -523,7 +566,7 @@ func dockerCannotRead(ctx context.Context, image string) string {
 		return ""
 	case strings.Contains(err.Error(), "denied") || strings.Contains(err.Error(), "unauthorized"):
 		return fmt.Sprintf("docker may not read %s. Log in with a key that can: for nvcr.io, an NGC key made in the org the images are published under", image)
-	case strings.Contains(err.Error(), "no such manifest") || strings.Contains(err.Error(), "not found"):
+	case strings.Contains(err.Error(), "no such manifest") || strings.Contains(err.Error(), "manifest unknown") || strings.Contains(err.Error(), "not found"):
 		return fmt.Sprintf("%s does not exist; check the version the plan names", image)
 	default:
 		return fmt.Sprintf("docker cannot read %s: %v", image, err)
@@ -921,6 +964,67 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 		return "", fmt.Errorf("git %s: %w", args[0], err)
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// chooseBuild reads --build. changed builds what the checkout changes since
+// base, the commit the plan resolved, committed or not.
+func chooseBuild(ctx context.Context, out io.Writer, root, base string, names []string) (lane.Build, error) {
+	var named []string
+	changed := false
+	for _, name := range names {
+		if name == "changed" {
+			changed = true
+		} else {
+			named = append(named, name)
+		}
+	}
+	build, err := lane.ParseBuild(named)
+	if err != nil || !changed {
+		return build, err
+	}
+	if base == "" {
+		return lane.Build{}, fmt.Errorf("--build changed compares with the commit the plan resolved, and this plan names none; name the components to build instead")
+	}
+	diff, err := gitOutput(ctx, root, "diff", "--name-only", base)
+	if err != nil {
+		return lane.Build{}, fmt.Errorf("--build changed: %w", err)
+	}
+	var paths []string
+	if diff != "" {
+		paths = strings.Split(diff, "\n")
+	}
+	got, unexercised := lane.ChangedBuild(paths)
+	short := base
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	if names := got.Names(); len(names) > 0 {
+		fmt.Fprintf(out, "changed since %s: %s\n", short, strings.Join(names, ", "))
+	} else {
+		fmt.Fprintf(out, "nothing the run builds has changed since %s\n", short)
+	}
+	for _, dir := range unexercised {
+		fmt.Fprintf(out, "warning: %s changed since %s, and the node runs the published build of it, not this one\n", dir, short)
+	}
+	return build.Or(got), nil
+}
+
+// builtHere is what r builds from the checkout, asked for or because the
+// plan names no published version.
+func builtHere(r lane.Run) lane.Build {
+	return lane.Build{Controller: r.ControllerBuild, CLI: r.CLIBuild, CAPIProvisioned: r.ProvisionedBuild}
+}
+
+func writeJSON(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o600)
+}
+
+func indent(s string) string {
+	return "      " + strings.ReplaceAll(s, "\n", "\n      ")
 }
 
 func copyFile(from, to string) error {

@@ -75,6 +75,12 @@ SITE_PROFILES_IMAGE ?= nke-e2e-profiles:local
 # Set to 0 to qualify a published tag, once one is cut past #850.
 SITE_NVKE_CONTROLLER_BUILD ?= 1
 
+# Build capi-provisioned from this checkout instead of pulling
+# SITE_PROVISIONED_IMAGE, for either SITE_ARCH: buildx loads the one platform
+# into docker, where docker save finds it. SITE_PROVISIONED_VERSION is the tag
+# and the version baked in.
+SITE_PROVISIONED_BUILD ?= 0
+
 # Build nvkectl from this checkout. Set to 0 to stage the published
 # SITE_CLI_REF instead: hack/fetch-nvkectl.sh pulls nvkectl-linux-$(SITE_ARCH)
 # from the artifact it names, which needs oras and the registry credentials
@@ -134,7 +140,11 @@ ifeq ($(SITE_NVKE_CONTROLLER_BUILD),1)
 else
 	docker pull --platform linux/$(SITE_ARCH) $(SITE_NVKE_CONTROLLER_IMAGE)
 endif
+ifeq ($(SITE_PROVISIONED_BUILD),1)
+	$(MAKE) -C "$(REPO_ROOT)/cluster-api-provider-provisioned" docker-build IMG=$(SITE_PROVISIONED_IMAGE) PLATFORMS=linux/$(SITE_ARCH) BUILDX_OUTPUT=type=docker BUILD_VERSION=$(SITE_PROVISIONED_VERSION)
+else
 	docker pull --platform linux/$(SITE_ARCH) $(SITE_PROVISIONED_IMAGE)
+endif
 	docker buildx build --platform linux/$(SITE_ARCH) --load -t $(SITE_PROFILES_IMAGE) ../fixtures
 	docker save --platform linux/$(SITE_ARCH) -o "$(SITE_INPUTS)/controller.tar" $(SITE_NVKE_CONTROLLER_IMAGE)
 	docker save --platform linux/$(SITE_ARCH) -o "$(SITE_INPUTS)/capi-provisioned.tar" $(SITE_PROVISIONED_IMAGE)
