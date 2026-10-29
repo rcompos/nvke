@@ -242,6 +242,7 @@ If a run dies before its teardown, the site node is the Forge instance labelled
 | `--stream`, `--combination` | the only one | Which stream of which combination to run |
 | `--registry` | `nvcr` | Where the site images are pulled from, `nvcr` or `ghcr` |
 | `--ngc-org` | `QUALIFY_E2E_NGC_ORG` | The org the NVCR images are published under |
+| `--controller-name` | read from the deploy path | The namespace and Service the controller is installed under, passed as `NVKE_CONTROLLER_NAMESPACE` and `NVKE_CONTROLLER_SERVICE`. Read from `deploy/nico/controller/release.yaml` at the controller's commit, so a controller from before the rename gets `nke-controller`; a name already set in the shell is left alone |
 | `--node-user` | `QUALIFY_E2E_NODE_USER`, then `NODE_USER` | The account the OS image bakes. Empty is the OSS images' |
 | `--work-dir` | a new directory under the user cache | Where everything the run writes goes, mode 0700 |
 | `--site-inputs`, `--reuse-site-inputs` | the work directory, off | Where the site inputs are built, and whether to reuse archives already there |

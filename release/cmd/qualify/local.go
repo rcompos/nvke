@@ -46,7 +46,7 @@ type localOptions struct {
 	plan, scope, version, resolution string
 	combination, stream              string
 	stage, registry, ngcOrg          string
-	nodeUser, remote                 string
+	nodeUser, remote, controllerName string
 	workDir, siteInputs              string
 	keepSite, dryRun                 bool
 	reuseSiteInputs, skipVerify      bool
@@ -125,6 +125,7 @@ machine.`,
 	f.StringVar(&o.registry, "registry", "nvcr", "where the site images are pulled from: nvcr or ghcr")
 	f.StringVar(&o.ngcOrg, "ngc-org", os.Getenv("QUALIFY_E2E_NGC_ORG"), "the NGC org the NVCR images are published under")
 	f.StringVar(&o.nodeUser, "node-user", firstEnv("QUALIFY_E2E_NODE_USER", "NODE_USER"), "the account the OS image bakes; empty is the OSS images'")
+	f.StringVar(&o.controllerName, "controller-name", "", "the namespace and Service the deploy path installs the controller under (default: read from the controller's deploy path)")
 	f.StringVar(&o.remote, "remote", "origin", "the upstream remote: tags and a missing controller commit come from it, and its size sets the describe length")
 	f.StringVar(&o.workDir, "work-dir", "", "where the run writes everything (default: a new directory under the user cache)")
 	f.StringVar(&o.siteInputs, "site-inputs", "", "where the site inputs are built (default: site-inputs in the work directory)")
@@ -242,11 +243,21 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		}
 	}
 
+	treeRef := "HEAD"
 	if !r.ControllerBuild {
 		step("Making the controller's tree available")
 		if err := ensureControllerTree(ctx, out, root, o.remote, r, plan.Commit); err != nil {
 			return err
 		}
+		treeRef = controllerTreeRef(r, plan.Commit)
+	}
+	name, from, err := controllerName(ctx, root, treeRef, env, o.controllerName)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		env = append(env, lane.ControllerNameEnv(name)...)
+		fmt.Fprintf(out, "controller installed as %s (%s)\n", name, from)
 	}
 
 	reports := lane.Reports{
@@ -268,7 +279,11 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		if !o.reuseSiteInputs {
 			fmt.Fprintf(out, "  %smake %s\n", envPrefix(r.SiteInputsEnv()), strings.Join(makeArgs, " "))
 		}
-		fmt.Fprintf(out, "  (cd %s && go %s)\n", filepath.Join(root, e2eDir), strings.Join(goArgs, " "))
+		var suiteVars []string
+		if name != "" {
+			suiteVars = lane.ControllerNameEnv(name)
+		}
+		fmt.Fprintf(out, "  (cd %s && %sgo %s)\n", filepath.Join(root, e2eDir), envPrefix(suiteVars), strings.Join(goArgs, " "))
 		fmt.Fprintf(out, "\nplan and config: %s\n", workDir)
 		return nil
 	}
@@ -313,18 +328,25 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	}
 
 	step("Recording the qualification result")
+	resultPath := filepath.Join(workDir, "qualify-result.json")
 	result := resultCmd()
 	result.SetOut(out)
-	result.SetArgs([]string{
+	result.SetArgs(append([]string{
 		"--plan", keptPlan,
 		"--report", reports.JSON,
 		"--combination", r.Inputs.Combination,
 		"--stream", r.Inputs.Stream,
 		"--started-at", startedAt.Format(time.RFC3339),
-		"--output", filepath.Join(workDir, "qualify-result.json"),
-	})
+		"--output", resultPath,
+	}, localIdentity(context.WithoutCancel(ctx), root, o.remote)...))
 	if err := result.ExecuteContext(context.WithoutCancel(ctx)); err != nil {
 		fmt.Fprintln(out, "  recording the result failed:", err)
+	}
+	// Ginkgo and qualify result write 0644; the reports carry remote output.
+	for _, path := range []string{reports.JUnit, reports.JSON, resultPath} {
+		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(out, "  could not make %s private: %v\n", path, err)
+		}
 	}
 
 	fmt.Fprintf(out, "\neverything this run wrote is in %s\n", workDir)
@@ -685,6 +707,38 @@ func ensureControllerTree(ctx context.Context, out io.Writer, root, remote strin
 	return nil
 }
 
+// controllerTreeRef is the tree the deploy path is exported from.
+func controllerTreeRef(r lane.Run, commit string) string {
+	if r.Inputs.ControllerVersionStrategy == resolve.VersionStrategyCommitDescribe {
+		return commit
+	}
+	return "refs/tags/controller/" + r.ControllerVersion
+}
+
+// controllerName is the name the suite should look for the controller under,
+// and where it came from: --controller-name, else the shell's own setting,
+// which is left alone, else the deploy path's release at ref. The suite fails
+// before any machine is taken when it and the deploy path disagree, and the
+// name changed between releases, so a published controller older than the
+// checkout's suite needs its own.
+func controllerName(ctx context.Context, root, ref string, env []string, flag string) (name, from string, err error) {
+	if flag != "" {
+		return flag, "--controller-name", nil
+	}
+	if firstEnvIn(env, lane.ControllerNameVars...) != "" {
+		return "", "", nil
+	}
+	b, err := gitOutput(ctx, root, "show", ref+":"+lane.ControllerReleasePath)
+	if err != nil {
+		return "", "", fmt.Errorf("reading the controller's deploy path at %s: %w (pass --controller-name)", ref, err)
+	}
+	name, err = lane.ReleaseNamespace([]byte(b))
+	if err != nil {
+		return "", "", fmt.Errorf("%s at %s: %w (pass --controller-name)", lane.ControllerReleasePath, ref, err)
+	}
+	return name, "from " + lane.ControllerReleasePath + " at the controller's commit", nil
+}
+
 func haveSiteInputs(r lane.Run) error {
 	want := []string{"controller.tar", "capi-provisioned.tar", "profiles.tar"}
 	var missing []string
@@ -760,6 +814,49 @@ func writeResolved(path string, o localOptions, r lane.Run, root, head string, a
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o600)
+}
+
+// localIdentity is the qualify result flags that say which checkout ran, as
+// GitHub Actions' environment says for the workflow: the repository the
+// branch tracks, else remote; the commit; and who ran it. A tree with
+// uncommitted changes did not run that commit alone, and the workflow says so.
+func localIdentity(ctx context.Context, root, remote string) []string {
+	var args []string
+	if upstream, err := gitOutput(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
+		remote, _, _ = strings.Cut(upstream, "/")
+	}
+	if url, err := gitOutput(ctx, root, "remote", "get-url", remote); err == nil {
+		if repo := repositoryFromURL(url); repo != "" {
+			args = append(args, "--repository", repo)
+		}
+	}
+	if sha, err := gitOutput(ctx, root, "rev-parse", "HEAD"); err == nil {
+		args = append(args, "--sha", sha)
+	}
+	workflow := "qualify local"
+	if dirty, err := gitOutput(ctx, root, "status", "--porcelain", "--untracked-files=no"); err == nil && dirty != "" {
+		workflow += ", with uncommitted changes"
+	}
+	args = append(args, "--workflow", workflow)
+	if actor, err := gitOutput(ctx, root, "config", "user.name"); err == nil && actor != "" {
+		args = append(args, "--actor", actor)
+	}
+	return args
+}
+
+// repositoryFromURL is the owner/name a git remote URL names, in either the
+// https or the scp-like ssh form, or "" for one it cannot read.
+func repositoryFromURL(url string) string {
+	url = strings.TrimSuffix(strings.TrimSuffix(url, "/"), ".git")
+	if _, path, ok := strings.Cut(url, "://"); ok {
+		_, url, _ = strings.Cut(path, "/")
+	} else if _, path, ok := strings.Cut(url, ":"); ok {
+		url = path
+	}
+	if strings.Count(url, "/") != 1 || strings.HasPrefix(url, "/") || strings.HasSuffix(url, "/") {
+		return ""
+	}
+	return url
 }
 
 // keepAwake holds off sleep on macOS for as long as this process lives: a

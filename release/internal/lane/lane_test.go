@@ -298,6 +298,22 @@ func TestRequiredEnvReadsTheForgeEnvironment(t *testing.T) {
 	}
 }
 
+func TestReleaseNamespace(t *testing.T) {
+	b, err := os.ReadFile("../../../" + ControllerReleasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReleaseNamespace(b); err != nil || got != "nvke-controller" {
+		t.Errorf("this checkout's deploy path installs %q, %v", got, err)
+	}
+	if got, err := ReleaseNamespace([]byte("release:\n  name: nke-controller\n  namespace: nke-controller\n")); err != nil || got != "nke-controller" {
+		t.Errorf("a release from before the rename gave %q, %v", got, err)
+	}
+	if _, err := ReleaseNamespace([]byte("release:\n  name: x\n")); err == nil {
+		t.Error("a release with no namespace was accepted")
+	}
+}
+
 func TestJumpHosts(t *testing.T) {
 	b, err := os.ReadFile("../../../controller/test/e2e/environments/forge.yaml")
 	if err != nil {

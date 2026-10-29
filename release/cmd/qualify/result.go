@@ -24,6 +24,7 @@ func resultCmd() *cobra.Command {
 		stream      string
 		output      string
 		startedAt   string
+		identity    qualification.RunIdentity
 	)
 
 	cmd := &cobra.Command{
@@ -120,7 +121,7 @@ when the failure was discovered.`,
 					Dependencies: combo.Dependencies,
 					StartedAt:    runStartedAt,
 					FinishedAt:   runFinishedAt,
-					Identity:     identityFromEnv(),
+					Identity:     withIdentity(identityFromEnv(), identity),
 				},
 				qualification.ResultCombination{
 					ID:         combo.ID,
@@ -148,6 +149,10 @@ when the failure was discovered.`,
 	f.StringVar(&stream, "stream", "", "the stream name this leg ran (required)")
 	f.StringVar(&output, "output", "-", "where to write the result, - is stdout")
 	f.StringVar(&startedAt, "started-at", "", "RFC3339 time the job started, used as StartedAt only when --report is missing (default: now, which is a near-zero-duration guess)")
+	f.StringVar(&identity.Repository, "repository", "", "the repository the run came from, for a run outside GitHub Actions (default: GITHUB_REPOSITORY)")
+	f.StringVar(&identity.SHA, "sha", "", "the commit that ran (default: GITHUB_SHA)")
+	f.StringVar(&identity.Workflow, "workflow", "", "what ran it (default: GITHUB_WORKFLOW)")
+	f.StringVar(&identity.Actor, "actor", "", "who ran it (default: GITHUB_ACTOR)")
 
 	for _, name := range []string{"plan", "report", "stream"} {
 		_ = cmd.MarkFlagRequired(name)
@@ -221,4 +226,21 @@ func identityFromEnv() qualification.RunIdentity {
 		Workflow:   os.Getenv("GITHUB_WORKFLOW"),
 		Actor:      os.Getenv("GITHUB_ACTOR"),
 	}
+}
+
+// withIdentity is id with each field given replaced.
+func withIdentity(id, given qualification.RunIdentity) qualification.RunIdentity {
+	if given.Repository != "" {
+		id.Repository = given.Repository
+	}
+	if given.SHA != "" {
+		id.SHA = given.SHA
+	}
+	if given.Workflow != "" {
+		id.Workflow = given.Workflow
+	}
+	if given.Actor != "" {
+		id.Actor = given.Actor
+	}
+	return id
 }

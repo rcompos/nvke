@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dsx-ai-factory/nvke/release/internal/qualification"
 )
 
 func TestSuiteEnvTakesTheTeleportProxyFromForge(t *testing.T) {
@@ -74,6 +76,47 @@ func TestLocalNeedsAStage(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "stage") || strings.Contains(err.Error(), "plan") {
 		t.Fatalf("want only --stage required, got %v", err)
+	}
+}
+
+func TestControllerNameComesFromTheDeployPath(t *testing.T) {
+	root, err := gitOutput(t.Context(), "", "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Skip(err)
+	}
+	name, from, err := controllerName(t.Context(), root, "HEAD", nil, "")
+	if err != nil || name != "nvke-controller" || !strings.Contains(from, "release.yaml") {
+		t.Errorf("HEAD gave %q (%s), %v", name, from, err)
+	}
+	if name, _, _ := controllerName(t.Context(), root, "HEAD", nil, "nke-controller"); name != "nke-controller" {
+		t.Errorf("--controller-name gave %q", name)
+	}
+	if name, _, err := controllerName(t.Context(), root, "HEAD", []string{"CWE_NAMESPACE=mine"}, ""); name != "" || err != nil {
+		t.Errorf("a name the shell set was overridden with %q, %v", name, err)
+	}
+}
+
+func TestRepositoryFromURL(t *testing.T) {
+	for url, want := range map[string]string{
+		"https://github.com/example/nvke.git":      "example/nvke",
+		"https://github.com/example/nvke":          "example/nvke",
+		"git@github.com:example/nvke.git":          "example/nvke",
+		"ssh://git@github.com/example/nvke.git":    "example/nvke",
+		"https://gitlab.example.test/a/b/nvke.git": "",
+		"/some/local/path":                         "",
+	} {
+		if got := repositoryFromURL(url); got != want {
+			t.Errorf("repositoryFromURL(%q) = %q, want %q", url, got, want)
+		}
+	}
+}
+
+func TestResultTakesTheIdentityItIsGiven(t *testing.T) {
+	t.Setenv("GITHUB_REPOSITORY", "from/env")
+	t.Setenv("GITHUB_RUN_ID", "7")
+	got := withIdentity(identityFromEnv(), qualification.RunIdentity{SHA: "abc", Workflow: "qualify local"})
+	if got.Repository != "from/env" || got.RunID != "7" || got.SHA != "abc" || got.Workflow != "qualify local" {
+		t.Errorf("identity %+v", got)
 	}
 }
 
