@@ -827,6 +827,12 @@ Prerequisites: a way to reach the jump host (below), the jump host in
 Neither the proxy nor the jump host is checked in; secrets are read only from
 the environment.
 
+To run what one leg of the `qualify-e2e` workflow runs, from a plan and with
+your own credentials, use `qualify local`; see
+[Running a stream from a workstation](../../../release/README.md#running-a-stream-from-a-workstation).
+It does everything below for you and checks the prerequisites before a machine
+is taken. The rest of this section is what it does by hand.
+
 **On DSX** (`-e2e.environment=dsx`) the credential is different and the stage
 is limited. Each datahall carries its own SSA client, named for the key it is
 filed under in `environments/dsx.yaml`:

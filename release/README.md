@@ -9,7 +9,8 @@ qualification run would cover.
 > published. Each stream's leg then records its outcome with `qualify result`
 > and ships it to TestGrid with `qualify publish`. The
 > [`qualify-e2e` workflow](../.github/workflows/qualify-e2e.yml) runs all four
-> and qualifies one job per stream.
+> and qualifies one job per stream. `qualify local` runs one of those jobs
+> from a workstation.
 
 ## Usage
 
@@ -160,6 +161,95 @@ $ go run ./release/cmd/qualify plan --subject nvke --version v0.21.0 --scope ful
 }
 ```
 
+## Running a stream from a workstation
+
+`qualify local` runs one stream of a plan on the hardware lane the way one leg
+of the `qualify-e2e` workflow does, with the credentials in your shell instead
+of the workflow's. It is the way to run the lane against code that is not on
+`main`, such as a pull request from a fork, which the workflow cannot run.
+
+Run it from the root of the checkout under test, since that is the suite it
+compiles. A binary built from one checkout can run another:
+
+```console
+$ go build -o ~/bin/qualify ./release/cmd/qualify
+$ cd <the checkout under test>
+
+# Check everything and print what would run; takes no machine
+$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage provision --dry-run
+
+# Take a node, reach it, release it
+$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage provision
+
+# The whole lane, focused on the tenant
+$ qualify local --plan plan.json --stream forge-gb200-arm64-ubuntu-24.04-kube-1.36 --stage full \
+    --suite-arg=-ginkgo.focus=tenant
+```
+
+It does what the workflow's `qualify-run` job does, in the same order:
+
+1. Checks what the run needs, and names every gap at once before a machine is
+   taken. That covers:
+   - `FORGE_API_KEY`;
+   - `NGC_API_KEY` and a docker login for `--registry nvcr`;
+   - every `${NAME}` that `environments/<provider>.yaml` requires;
+   - a valid `tsh` login, unless `TELEPORT_IDENTITY_FILE` or `JUMP_HOST_PASSWORD` is set;
+   - the tools on `PATH`: `go`, `git`, `make`, `docker` with buildx, and `oras` when nvkectl is published;
+   - nothing left in `controller/test/e2e` by an earlier run.
+2. Runs `qualify verify` on the plan, unless `--skip-verify` is passed.
+3. Fetches the controller's commit or release tag when the checkout lacks it,
+   since the deploy path is exported from that tree.
+4. Builds the site inputs with `make -C controller/test/e2e site-inputs`.
+5. Writes the e2e config and runs the suite with the workflow's flags and
+   timeouts. On macOS, `caffeinate` holds off sleep for the length of the run.
+6. Moves what the suite left in its directory into the work directory. It then
+   withholds every `*_JUMP_HOST` and `SSA_ISSUER` value from the text files
+   there, and records the result with `qualify result`. Nothing is published.
+
+Teleport uses your own login: the suite's dialer falls back to the `tsh`
+profile when `TELEPORT_IDENTITY_FILE` is unset, and `TELEPORT_PROXY` is taken
+from `FORGE_TELEPORT_PROXY` when only that is set. A person's role may grant a
+different login on the jump host from the bot's `root`, so set
+`FORGE_TELEPORT_LOGIN` (and `FORGE_SITE_2_TELEPORT_LOGIN`) to yours.
+
+Interrupt it with one Ctrl-C. Ginkgo then runs its cleanup, which is what
+releases the node. A second interrupt skips that cleanup and leaks the node.
+If a run dies before its teardown, the site node is the Forge instance labelled
+`purpose=nke-e2e-site-controller`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--plan` | required | The plan to run from |
+| `--stage` | required | `provision`, `bootstrap` or `full`, as `-e2e.site-stage` |
+| `--stream`, `--combination` | the only one | Which stream of which combination to run |
+| `--registry` | `nvcr` | Where the site images are pulled from, `nvcr` or `ghcr` |
+| `--ngc-org` | `QUALIFY_E2E_NGC_ORG` | The org the NVCR images are published under |
+| `--node-user` | `QUALIFY_E2E_NODE_USER`, then `NODE_USER` | The account the OS image bakes. Empty is the OSS images' |
+| `--work-dir` | a new directory under the user cache | Where everything the run writes goes, mode 0700 |
+| `--site-inputs`, `--reuse-site-inputs` | the work directory, off | Where the site inputs are built, and whether to reuse archives already there |
+| `--keep-site` | off | Keep the site node when the run fails. It must then be deleted by hand |
+| `--suite-arg` | none | An extra suite argument after the workflow's own, repeatable |
+| `--wait`, `--skip-verify` | `0`, off | How long `verify` waits for an unpublished artifact, or whether to skip it |
+| `--remote` | `origin` | Where a missing controller commit or tag is fetched from |
+| `--dry-run` | off | Check and print what would run, and take no machine |
+
+The work directory holds the following, all mode 0600:
+
+- `e2e-config.yaml`;
+- `plan.json`;
+- `resolved-inputs.json`, what the run resolved;
+- `qualify-e2e.log`, the run log;
+- the JUnit and JSON reports;
+- the suite's diagnostics;
+- `qualify-result.json`.
+
+The reports carry remote command output, so treat the directory as you would
+the workflow's artifacts and do not attach it anywhere public.
+
+The command derives everything from the plan in
+[`internal/lane/`](internal/lane/), which mirrors the workflow's resolve steps.
+A change to what the workflow passes the suite needs the same change there.
+
 ## How the plan is used
 
 `plan.json` is the input to a qualification run. In the
@@ -219,7 +309,8 @@ publications; it does not replace them.
 | [`registry.yaml`](registry.yaml) | How each component resolves to a version, and the named locations artifacts are published under. It holds the rule that finds a version, never a version |
 | [`policy.yaml`](policy.yaml) | The streams that exist and the scopes over them |
 | [`qualification.yaml`](qualification.yaml) | What is qualified when NVKE is qualified as a whole: the components tested together, and the other versions a run needs |
-| [`cmd/qualify/`](cmd/qualify/) | The binary. `plan` resolves what to qualify, `verify` checks that it is published |
+| [`cmd/qualify/`](cmd/qualify/) | The binary. `plan` resolves what to qualify, `verify` checks that it is published, `local` runs one stream from a workstation |
+| [`internal/lane/`](internal/lane/) | One stream of a plan turned into what the hardware lane runs: the site-inputs build, the e2e config and the suite's command line |
 | [`internal/qualification/`](internal/qualification/) | Reading and checking the three files, and turning them into a plan |
 | [`internal/resolve/`](internal/resolve/) | The resolution strategies. Of this repository it takes only `internal/artifact` |
 | [`internal/artifact/`](internal/artifact/) | Asking whether a location holds something, over HTTPS or a registry, and waiting for one that is still publishing |

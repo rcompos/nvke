@@ -3,8 +3,8 @@
 
 // Command qualify drives release qualification: plan resolves what to
 // qualify, result records what one stream ran, publish ships a stream's
-// result and JUnit report to a destination, and verify checks that what a
-// plan names is published.
+// result and JUnit report to a destination, verify checks that what a plan
+// names is published, and local runs one stream from a workstation.
 package main
 
 import (
@@ -51,12 +51,14 @@ func root() *cobra.Command {
   plan       resolve what to qualify
   result     record what one stream of one combination qualified
   publish    ship a stream's result and JUnit report to a destination
-  verify     check that everything a plan names is published`,
+  verify     check that everything a plan names is published
+  local      run one stream of a plan on the hardware lane from this workstation`,
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(planCmd())
 	cmd.AddCommand(resultCmd())
 	cmd.AddCommand(publishCmd())
 	cmd.AddCommand(verifyCmd())
+	cmd.AddCommand(localCmd())
 	return cmd
 }
