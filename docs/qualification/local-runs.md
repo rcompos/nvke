@@ -98,7 +98,62 @@ serial console.
 ## What it needs from your shell
 
 A run reads the same names the workflow's job puts in its environment, from
-the shell that starts it.
+the shell that starts it. Most of them are the same for everyone who runs the
+lane, and the lane owners can give them to you. Only the jump hosts and your
+Teleport login on each are your own, plus the Forge API key, which is secret.
+
+### The simplest case
+
+A `--from-source` run needs nothing from a registry, so this is all of it.
+Keep it in a file only you can read, outside the repository:
+
+```bash
+# ~/nvke-forge.env (chmod 600)
+
+# The same for everyone; ask the lane owners.
+export FORGE_TELEPORT_PROXY=<teleport proxy>
+export QUALIFY_E2E_NGC_ORG=<ngc org>
+export FORGE_ORG_ID=<org id>
+export FORGE_SITE_ID=<site-1 id>
+export FORGE_VPC_ID=<site-1 vpc id>
+export FORGE_SUBNET_ID=<site-1 subnet id>
+export FORGE_SSH_KEY_GROUP_ID=<site-1 key group id>
+export FORGE_INSTANCE_TYPE_CPU_ID=<site-1 cpu type id>
+export FORGE_INSTANCE_TYPE_GPU_ID=<site-1 gpu type id>
+
+# Yours: the site-1 jump host, and one of the Logins `tsh status` lists.
+export FORGE_JUMP_HOST=<jump host>
+export FORGE_TELEPORT_LOGIN=<login>
+
+# Secret.
+export FORGE_API_KEY=<forge api key>
+```
+
+Then, from the repository root:
+
+```bash
+source ~/nvke-forge.env
+tsh login --ttl=720
+go run ./release/cmd/qualify local --stream forge-l40s-amd64-ubuntu-24.04-kube-1.36 --stage full --from-source
+```
+
+For a GB200 stream, add site-2. The ids are shared; the jump host and login
+are yours:
+
+```bash
+export FORGE_SITE_2_SITE_ID=<site-2 id>
+export FORGE_SITE_2_VPC_ID=<site-2 vpc id>
+export FORGE_SITE_2_VPC_PREFIX_ID=<site-2 vpc prefix id>
+export FORGE_SITE_2_SSH_KEY_GROUP_ID=<site-2 key group id>
+export FORGE_SITE_2_INSTANCE_TYPE_CPU_AMD64_ID=<site-2 amd64 cpu type id>
+export FORGE_SITE_2_INSTANCE_TYPE_CPU_ARM64_ID=<site-2 arm64 cpu type id>
+export FORGE_SITE_2_INSTANCE_TYPE_GPU_GB200_ID=<site-2 gb200 type id>
+export FORGE_SITE_2_JUMP_HOST=<jump host>
+export FORGE_SITE_2_TELEPORT_LOGIN=<login>
+```
+
+Pulling images instead of building them adds a registry credential; see
+[Registry](#registry). The tables below are the reference for every name.
 
 ### Tools
 
@@ -162,9 +217,6 @@ Planning needs `QUALIFY_E2E_NGC_ORG` whatever the registry, because
 | `QUALIFY_E2E_SITE_CONTROLLER_VERSION` | The plan's controller | The site controller version, in place of the one the plan names |
 | `SITE_DEPLOY_PATH_REF` | The controller's commit | The commit the deploy path is exported from |
 | `NVKE_CONTROLLER_NAMESPACE`, `NVKE_CONTROLLER_SERVICE` | `nvke-controller` | The name the controller is installed under. A release cut before the rename uses `nke-controller`. |
-
-Keep the values in a file of your own outside the repository and source it;
-none of them is checked in.
 
 ## Run directory
 
