@@ -601,6 +601,9 @@ jobs:
       # needed the machine has been read off it. A tag push never reads it:
       # nobody is there to read a kept machine, or to delete it.
       KEEP_SITE: ${{ inputs.keep-site || (github.event_name != 'push' && vars.QUALIFY_E2E_KEEP_SITE) || false }}
+      # Keeping a passed tenant skips the spec that deletes it, which a
+      # qualification has to run, so only qualify local sets this.
+      KEEP_TENANT: false
       # ghcr or nvcr. Only the runner pulls from it: every image it names is
       # staged onto the node as an archive. The node's own pull is CAPNICo,
       # which is published to GHCR alone, so the GHCR login below stays either

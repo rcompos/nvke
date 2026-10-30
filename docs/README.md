@@ -176,6 +176,7 @@ Deeper module documentation:
 | [qualification/hardware-lane.md](qualification/hardware-lane.md) | How a candidate is qualified on real hardware, layer by layer |
 | [qualification/environments.md](qualification/environments.md) | Declaring the infrastructure a run can execute against |
 | [qualification/triage.md](qualification/triage.md) | Telling a site fault from a code defect on a failed hardware run |
+| [qualification/local-runs.md](qualification/local-runs.md) | Running the hardware lane from a workstation with `qualify local` |
 | [../controller/integration-test/README.md](../controller/integration-test/README.md) | The integration tests |
 | [../controller/nico-sim/docs/e2e-testing.md](../controller/nico-sim/docs/e2e-testing.md) | End-to-end testing for nico-sim's VM backend |
 

@@ -824,7 +824,9 @@ provisioned: the site lane's tenant entries are built only when it is set, so
 a bare `nico-forge` without it selects 42 specs and reaches no hardware.
 
 The node is torn down afterwards (tenants are deleted first). `-e2e.keep-site`, or
-`lifecycle.preserveOnFailure` with a failed spec, keeps it.
+`lifecycle.preserveOnFailure` with a failed spec, keeps it. `lifecycle.skipDelete`
+keeps every tenant as well, passed or not, and skips the spec that deletes one;
+`qualify local --keep-tenant` sets it, and the workflow never does.
 
 Prerequisites: a way to reach the jump host (below), the jump host in
 `FORGE_JUMP_HOST` (read by `environments/forge.yaml`) and `FORGE_API_KEY`.
@@ -919,7 +921,23 @@ is a client of the CWE it bootstraps, so the two have to be one commit; the
 newest CWE on GHCR predates #850 and rejects this checkout's nvkectl at
 "creating the site cluster". `SITE_NVKE_CONTROLLER_BUILD=0` pulls
 `SITE_NVKE_CONTROLLER_VERSION` as a published tag instead, for qualifying a release
-once one is cut past #850.
+once one is cut past #850. The controller is built for `SITE_ARCH`, either
+architecture; building for the other one than the host's runs under emulation
+and is slow.
+
+capi-provisioned is pulled by default. `SITE_PROVISIONED_BUILD=1` builds it from
+the checkout for `SITE_ARCH` instead, tagged and versioned
+`SITE_PROVISIONED_VERSION`, which is then what `-e2e.versions=capi-provisioned=`
+has to say. With all three built, nothing in `site-inputs` pulls, and
+`SITE_IMAGE_REGISTRY` is only the prefix the images are named under:
+
+```bash
+gmake site-inputs SITE_IMAGE_REGISTRY=localhost/nvke \
+  SITE_NVKE_CONTROLLER_VERSION=<commit> SITE_PROVISIONED_BUILD=1 SITE_PROVISIONED_VERSION=<commit>
+```
+
+`qualify local --from-source` does this, with the commit under test as each
+version.
 
 To stage a published nvkectl instead, set `SITE_CLI_BUILD=0` and name the
 artifact. `site-inputs` pulls `nvkectl-linux-$(SITE_ARCH)` out of it into

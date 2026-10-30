@@ -216,6 +216,7 @@ func TestResolveAPublishedStream(t *testing.T) {
 		l.step(true, "resolve")
 		expect(t, l.values(), map[string]string{
 			"SITE_NVKE_CONTROLLER_BUILD": "0",
+			"SITE_PROVISIONED_BUILD":     "0",
 			"SITE_IMAGES":                "nvcr.io/example-org",
 			"SITE_ARCH":                  "amd64",
 			"SITE_ENVIRONMENT":           "forge",
@@ -233,8 +234,8 @@ func TestResolveAPublishedStream(t *testing.T) {
 	}
 }
 
-// An empty version is how a run asks for the controller and nvkectl to be
-// built from the checkout, named by its commit.
+// An empty version is how a run asks for a component to be built from the
+// checkout, named by its commit.
 func TestResolveBuildsWhatNamesNoVersion(t *testing.T) {
 	p := plan(t)
 	head := git(t, "rev-parse", "--short=12", "HEAD")
@@ -243,15 +244,45 @@ func TestResolveBuildsWhatNamesNoVersion(t *testing.T) {
 		l.step(true, "stream-env", p, "", "forge-l40s-amd64")
 		l.set("SITE_NVKE_CONTROLLER_VERSION", "")
 		l.set("CLI_VERSION", "")
+		l.set("CAPI_PROVISIONED_VERSION", "")
 		l.step(true, "resolve")
 		expect(t, l.values(), map[string]string{
 			"SITE_NVKE_CONTROLLER_BUILD":   "1",
 			"SITE_NVKE_CONTROLLER_VERSION": head,
+			"SITE_PROVISIONED_BUILD":       "1",
+			"CAPI_PROVISIONED_VERSION":     head,
 			"SITE_CLI_BUILD":               "1",
 			"CLI_VERSION":                  head,
 			"SITE_NVKECTL":                 "cli/dist/nvkectl-linux-amd64",
 			"SITE_IMAGES":                  "ghcr.io/dsx-ai-factory/nvke",
 		})
+	}
+}
+
+// Every image built here: nothing is pulled, so no registry credential is
+// read, and the images are named under a prefix no registry answers to.
+func TestResolveLocalNeedsNoRegistry(t *testing.T) {
+	p := plan(t)
+	for _, sh := range shells(t) {
+		l := newLane(t, sh, map[string]string{"SITE_IMAGE_REGISTRY": "local", "QUALIFY_E2E_NGC_ORG": "", "NGC_API_KEY": ""})
+		l.step(true, "stream-env", p, "", "forge-l40s-amd64")
+		l.set("SITE_NVKE_CONTROLLER_VERSION", "")
+		l.set("CLI_VERSION", "")
+		l.set("CAPI_PROVISIONED_VERSION", "")
+		l.step(true, "resolve")
+		expect(t, l.values(), map[string]string{"SITE_IMAGES": "localhost/nvke"})
+	}
+}
+
+func TestResolveBuildsTheControllerForArm64(t *testing.T) {
+	p := plan(t)
+	for _, sh := range shells(t) {
+		l := newLane(t, sh, nil)
+		l.step(true, "stream-env", p, "", "dsx-cpu-arm64")
+		l.set("OS_IMAGE_AMD64", "https://cdn.example/image-amd64.qcow2")
+		l.set("SITE_NVKE_CONTROLLER_VERSION", "")
+		l.step(true, "resolve")
+		expect(t, l.values(), map[string]string{"SITE_NVKE_CONTROLLER_BUILD": "1", "SITE_ARCH": "arm64"})
 	}
 }
 
@@ -279,10 +310,10 @@ func TestResolveRefuses(t *testing.T) {
 		want         string
 	}{
 		{"an image without its bootloader", "dsx-cpu-arm64", nil, nil, "go together"},
-		{"building the controller for arm64", "dsx-cpu-arm64", nil,
-			map[string]string{"OS_IMAGE_AMD64": "https://cdn.example/image-amd64.qcow2", "SITE_NVKE_CONTROLLER_VERSION": ""}, "amd64-only"},
 		{"nvcr without an NGC key", "forge-l40s-amd64", map[string]string{"NGC_API_KEY": ""}, nil, "NGC_API_KEY"},
-		{"an unknown registry", "forge-l40s-amd64", map[string]string{"SITE_IMAGE_REGISTRY": "quay"}, nil, "is not ghcr or nvcr"},
+		{"an unknown registry", "forge-l40s-amd64", map[string]string{"SITE_IMAGE_REGISTRY": "quay"}, nil, "is not ghcr, nvcr or local"},
+		{"local with an image to pull", "forge-l40s-amd64", map[string]string{"SITE_IMAGE_REGISTRY": "local"},
+			map[string]string{"SITE_NVKE_CONTROLLER_VERSION": "", "CLI_VERSION": ""}, "capi-provisioned would be pulled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, sh := range shells(t) {
@@ -309,6 +340,68 @@ func TestAStepRefusesAnUnsetInput(t *testing.T) {
 		delete(l.env, "SITE_INPUTS")
 		if out := l.step(false, "resolve"); !strings.Contains(out, "resolve reads SITE_INPUTS") {
 			t.Errorf("output = %q, want it to name SITE_INPUTS", out)
+		}
+	}
+}
+
+func TestConfigKeepsWhatItIsAskedTo(t *testing.T) {
+	for _, tc := range []struct {
+		site, tenant string
+		want         string
+	}{
+		{"false", "false", ""},
+		{"true", "false", "lifecycle:\n  preserveOnFailure: true\n"},
+		{"false", "true", "lifecycle:\n  skipDelete: true\n"},
+		{"true", "true", "lifecycle:\n  skipDelete: true\n"},
+	} {
+		for _, sh := range shells(t) {
+			config := filepath.Join(t.TempDir(), "e2e-config.yaml")
+			l := newLane(t, sh, map[string]string{
+				"E2E_CONFIG":                      config,
+				"NODE_USER":                       "",
+				"SITE_NVKECTL":                    "/w/nvkectl",
+				"SITE_DEPLOY_PATH_REF":            "",
+				"SITE_IMAGES":                     "localhost/nvke",
+				"SITE_NVKE_CONTROLLER_REPOSITORY": "nvke-controller",
+				"KEEP_SITE":                       tc.site,
+				"KEEP_TENANT":                     tc.tenant,
+			})
+			l.step(true, "config")
+			b, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, got, _ := strings.Cut(string(b), "lifecycle:\n")
+			if got != "" {
+				got = "lifecycle:\n" + got
+			}
+			if got != tc.want {
+				t.Errorf("%s keep-site=%s keep-tenant=%s: lifecycle = %q, want %q", sh, tc.site, tc.tenant, got, tc.want)
+			}
+		}
+	}
+}
+
+// bash reads a script as it runs it. A step must not read past its own
+// dispatch, or a run that outlives an edit to the script resumes in the
+// edited text: here, a line appended after the dispatch.
+func TestAStepReadsNothingPastTheDispatch(t *testing.T) {
+	p := plan(t)
+	b, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(t.TempDir(), "controller", "test", "e2e", "hack", "qualify-lane.sh")
+	if err := os.MkdirAll(filepath.Dir(copied), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copied, append(b, []byte("\nnot-a-step-command\n")...), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range shells(t) {
+		out, err := exec.Command(sh, copied, "matrix", p).CombinedOutput()
+		if err != nil || strings.Contains(string(out), "not-a-step-command") {
+			t.Errorf("%s matrix ran past the dispatch: err = %v\n%s", sh, err, out)
 		}
 	}
 }

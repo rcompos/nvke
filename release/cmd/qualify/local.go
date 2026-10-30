@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,14 +30,29 @@ import (
 // same steps, so this command adds no logic of its own to a run.
 const laneScript = "controller/test/e2e/hack/qualify-lane.sh"
 
+// buildable is what the lane can build from the checkout: each component's
+// version variable, which the resolve step takes empty to mean "build it",
+// and the plan entries the build stands in for, which verify then skips.
+var buildable = []struct {
+	name, version string
+	planned       []string
+}{
+	{"controller", "SITE_NVKE_CONTROLLER_VERSION", []string{"controller"}},
+	{"cli", "CLI_VERSION", []string{"cli", "cli-amd64", "cli-arm64"}},
+	{"capi-provisioned", "CAPI_PROVISIONED_VERSION", []string{"capi-provisioned"}},
+}
+
 type localOptions struct {
 	plan, scope, subject string
+	version, overrides   string
 	combination, stream  string
 	stage, registry      string
 	ngcOrg, nodeUser     string
 	runDir               string
 	build                []string
-	keepSite, dryRun     bool
+	fromSource           bool
+	keepSite, keepTenant bool
+	dryRun               bool
 	wait                 time.Duration
 }
 
@@ -47,24 +63,26 @@ func localCmd() *cobra.Command {
 		Short: "Run one stream on hardware from this checkout, as the workflow does",
 		Long: `Run one stream on hardware from this checkout, as the workflow does.
 
-For a change that has to be proven on hardware from a fork, whose pull request
-cannot start the qualification workflow. It runs that workflow's steps for one
-stream, from ` + laneScript + `, in the workflow's order:
-plan, verify, resolve, site inputs, config, the suite, withhold, result.
+The qualify-e2e workflow does not run for a fork's pull request, so a change
+from a fork cannot be proven on hardware there. This runs the same lane from
+your checkout, with your own credentials and Teleport login: it plans the run,
+checks the artifacts, stages the site images, runs the suite on Forge
+hardware, tears everything down, and records the result. Each step is a call
+to ` + laneScript + `, the script the workflow runs.
 
-Planning describes commits against the upstream repository's tags, fetched
-first, from the remote whose URL names ` + resolve.UpstreamRepository + `, so a
-clone whose origin is a fork plans what CI would. The CDN refuses workstations,
-so the OS images are asked for through the jump host.
+--build builds the named images from this checkout instead of pulling them.
+--from-source builds all of them and pulls none, so no registry credential is
+needed. The OS images are never built here.
 
-What the workflow takes from its environment, this takes from yours: the
-Forge and DSX identifiers and keys the environment files read, NGC_API_KEY for
-NVCR, GITHUB_ACTOR and GITHUB_TOKEN for GHCR, docker logged in to the
-registry the images come from, and a Teleport login (tsh login) in place of
-the workflow's bot. FORGE_TELEPORT_PROXY is taken for TELEPORT_PROXY.
+--version and --overrides choose what is planned, as they do for qualify plan:
+--version a tag other than the highest, and --overrides a published OS image
+URL in place of one that is not published yet.
 
-Everything the run writes is kept in --run-dir. One interrupt tears the node
-down; wait for it.`,
+Everything the run writes is kept in --run-dir. Press Ctrl-C once to stop:
+the node is torn down before the command exits.
+
+The credentials and tools a run needs are listed in
+docs/qualification/local-runs.md.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -75,14 +93,18 @@ down; wait for it.`,
 	f.StringVar(&o.plan, "plan", "", "the qualification plan to read, instead of planning --scope")
 	f.StringVar(&o.scope, "scope", "full", "the scope to plan when --plan is not given")
 	f.StringVar(&o.subject, "subject", "nvke", "the subject --scope plans")
+	f.StringVar(&o.version, "version", "", "the version of the subject to plan (default: its highest version)")
+	f.StringVar(&o.overrides, "overrides", "", "values to plan in place of what resolves, as name=value pairs separated by commas, as qualify plan takes them; not for a component --build builds")
 	f.StringVar(&o.combination, "combination", "", "the combination to run (required if the plan has more than one)")
 	f.StringVar(&o.stream, "stream", "", "the stream to run (required)")
 	f.StringVar(&o.stage, "stage", "", "how far the site run goes: provision, bootstrap or full (required)")
-	f.StringVar(&o.registry, "registry", "nvcr", "where the site images are pulled from: nvcr or ghcr")
+	f.StringVar(&o.registry, "registry", "", "where the site images are pulled from: nvcr, ghcr, or local when every image is built (default: nvcr; local with --from-source)")
 	f.StringVar(&o.ngcOrg, "ngc-org", "", "the NGC org the NVCR images are published under (default: $QUALIFY_E2E_NGC_ORG)")
 	f.StringVar(&o.nodeUser, "node-user", "", "the account the OS image bakes (default: $QUALIFY_E2E_NODE_USER; empty is the OSS images')")
-	f.StringSliceVar(&o.build, "build", nil, "components to build from the checkout instead of pulling: controller, cli")
-	f.BoolVar(&o.keepSite, "keep-site", false, "keep the site node when the run fails; it must then be deleted by hand")
+	f.StringSliceVar(&o.build, "build", nil, "components to build from the checkout instead of pulling: controller, cli, capi-provisioned")
+	f.BoolVar(&o.fromSource, "from-source", false, "build every image the site stages from the checkout and pull none: --build for all of them, and --registry local")
+	f.BoolVar(&o.keepSite, "keep-site", false, "keep the site node after the run, and a tenant whose specs failed; they must then be deleted by hand")
+	f.BoolVar(&o.keepTenant, "keep-tenant", false, "keep every tenant after the run, passed or not, and the site node they hang off; skips the spec that deletes the tenant, and they must then be deleted by hand")
 	f.BoolVar(&o.dryRun, "dry-run", false, "plan, verify, resolve and stage, and print the suite's arguments without taking a machine")
 	f.DurationVar(&o.wait, "wait", 0, "how long to keep asking for an artifact that is not published yet")
 	f.StringVar(&o.runDir, "run-dir", "", "where the run's files are kept (default: a new directory under the user cache)")
@@ -98,10 +120,11 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if o.nodeUser == "" {
 		o.nodeUser = os.Getenv("QUALIFY_E2E_NODE_USER")
 	}
-	for _, b := range o.build {
-		if b != "controller" && b != "cli" {
-			return fmt.Errorf("--build %q: only controller and cli are built here", b)
-		}
+	if err := o.resolveBuild(); err != nil {
+		return err
+	}
+	if err := o.checkPlanInputs(); err != nil {
+		return err
 	}
 	for _, tool := range []string{"bash", "jq", "git", "make", "docker", "tsh"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -147,7 +170,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := verifyLocal(ctx, out, combo, stream, o.wait); err != nil {
+	if err := verifyLocal(ctx, out, combo, stream, o.planned(), o.wait); err != nil {
 		return err
 	}
 	if !o.dryRun {
@@ -170,6 +193,7 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		"QUALIFY_E2E_NGC_ORG="+o.ngcOrg,
 		"NODE_USER="+o.nodeUser,
 		fmt.Sprintf("KEEP_SITE=%t", o.keepSite),
+		fmt.Sprintf("KEEP_TENANT=%t", o.keepTenant),
 		fmt.Sprintf("DRY_RUN=%t", o.dryRun),
 	)
 	// The workflow takes these from repository variables and secrets, and
@@ -196,9 +220,9 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	}
 	// Built rather than pulled is what an empty version means to the
 	// resolve step, as it does for a workflow run that names none.
-	for name, version := range map[string]string{"controller": "SITE_NVKE_CONTROLLER_VERSION", "cli": "CLI_VERSION"} {
-		if slices.Contains(o.build, name) {
-			if err := l.set(version, ""); err != nil {
+	for _, b := range buildable {
+		if slices.Contains(o.build, b.name) {
+			if err := l.set(b.version, ""); err != nil {
 				return err
 			}
 		}
@@ -252,22 +276,94 @@ func planLocal(ctx context.Context, out io.Writer, root, remote, planAt string, 
 	}
 	plan := planCmd()
 	plan.SetOut(out)
-	plan.SetArgs([]string{"--subject", o.subject, "--scope", o.scope, "--root", root, "--output", planAt})
+	plan.SetArgs([]string{"--subject", o.subject, "--scope", o.scope, "--version", o.version, "--overrides", o.overrides, "--root", root, "--output", planAt})
 	if err := plan.ExecuteContext(ctx); err != nil {
 		return fmt.Errorf("planning: %w", err)
 	}
 	return nil
 }
 
+// checkPlanInputs refuses what planning would ignore: --version and
+// --overrides with a plan that is read rather than made, and an override of a
+// component this run builds, whose version is the commit whatever the plan says.
+func (o *localOptions) checkPlanInputs() error {
+	if o.plan != "" && (o.version != "" || o.overrides != "") {
+		return errors.New("--version and --overrides choose what is planned, and --plan skips planning; give one or the other")
+	}
+	chosen, err := qualification.ParseOverrides(o.overrides)
+	if err != nil {
+		return fmt.Errorf("--overrides: %w", err)
+	}
+	built := o.planned()
+	for _, name := range slices.Sorted(maps.Keys(chosen)) {
+		if slices.Contains(built, name) {
+			return fmt.Errorf("--overrides %s: %s is built from this checkout, so its version is the commit; drop it from --build or from --overrides", name, name)
+		}
+	}
+	return nil
+}
+
+// resolveBuild checks --build and applies --from-source and the registry
+// default, so the rest of the run reads one settled set.
+func (o *localOptions) resolveBuild() error {
+	names := make([]string, 0, len(buildable))
+	for _, b := range buildable {
+		names = append(names, b.name)
+	}
+	for _, b := range o.build {
+		if !slices.Contains(names, b) {
+			return fmt.Errorf("--build %q: only %s are built here", b, strings.Join(names, ", "))
+		}
+	}
+	if o.fromSource {
+		o.build = names
+		if o.registry == "" {
+			o.registry = "local"
+		}
+		if o.registry != "local" {
+			return fmt.Errorf("--from-source pulls nothing, so --registry %s has nothing to do; leave it unset", o.registry)
+		}
+	}
+	if o.registry == "" {
+		o.registry = "nvcr"
+	}
+	return nil
+}
+
+func subset(names, of []string) bool {
+	for _, n := range names {
+		if !slices.Contains(of, n) {
+			return false
+		}
+	}
+	return true
+}
+
+// planned is the plan entries the run builds instead of pulling.
+func (o *localOptions) planned() []string {
+	var out []string
+	for _, b := range buildable {
+		if slices.Contains(o.build, b.name) {
+			out = append(out, b.planned...)
+		}
+	}
+	return out
+}
+
 // verifyLocal is qualify verify for the one stream, except that the CDN is
 // asked from the site: it refuses a workstation with the 403 it gives for
-// something that is not there.
-func verifyLocal(ctx context.Context, out io.Writer, combo *qualification.Combination, stream *qualification.Stream, wait time.Duration) error {
+// something that is not there. A location holding only what the run builds
+// is not asked about, since nothing is pulled from it.
+func verifyLocal(ctx context.Context, out io.Writer, combo *qualification.Combination, stream *qualification.Stream, built []string, wait time.Duration) error {
 	one := &qualification.Plan{Combinations: []qualification.Combination{*combo}}
 	one.Combinations[0].Streams = []qualification.Stream{*stream}
 
 	var registry, web []artifact.Location
 	for _, l := range locations(one) {
+		if subset(l.Wanted, built) {
+			fmt.Fprintf(out, "built here, not asked for: %s (%s)\n", l.URL, strings.Join(l.Wanted, ", "))
+			continue
+		}
 		if strings.HasPrefix(l.URL, "https://") {
 			web = append(web, l)
 		} else {

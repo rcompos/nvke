@@ -8,7 +8,7 @@
 #
 #   matrix PLAN                        the lanes' matrix, one entry per stream
 #   stream-env PLAN COMBINATION STREAM one stream's values, as the steps read them
-#   resolve                            the controller and nvkectl, and the run's shape
+#   resolve                            the controller, capi-provisioned and nvkectl, and the run's shape
 #   controller-image                   the name the published controller is under
 #   site-inputs                        build and stage what the node runs
 #   config                             write the e2e config the suite reads
@@ -60,21 +60,22 @@ inputs() {
         SITE_STAGE DRY_RUN SITE_IMAGE_REGISTRY QUALIFY_E2E_NGC_ORG NGC_API_KEY \
         ARCH PROVIDER GPU OS_IMAGE_AMD64 OS_IMAGE_BOOTLOADER_AMD64 OS_IMAGE_ARM64 OS_IMAGE_BOOTLOADER_ARM64 \
         KUBERNETES_VERSION CNI_OVN_VERSION KIND_VERSION CLUSTERCTL_VERSION NERDCTL_VERSION \
-        CLI_VERSION CLI_REF SITE_INPUTS
+        CLI_VERSION CLI_REF CAPI_PROVISIONED_VERSION SITE_INPUTS
       ;;
     controller-image) echo SITE_NVKE_CONTROLLER_BUILD SITE_IMAGE_REGISTRY SITE_IMAGES SITE_NVKE_CONTROLLER_VERSION ;;
     site-inputs)
       echo SITE_NVKE_CONTROLLER_VERSION SITE_NVKE_CONTROLLER_BUILD SITE_NVKE_CONTROLLER_REPOSITORY \
-        SITE_ARCH SITE_CLI_BUILD CLI_VERSION SITE_IMAGES CAPI_PROVISIONED_VERSION SITE_INPUTS
+        SITE_ARCH SITE_CLI_BUILD CLI_VERSION SITE_IMAGES CAPI_PROVISIONED_VERSION SITE_PROVISIONED_BUILD \
+        SITE_INPUTS
       ;;
     config)
       echo NODE_USER SITE_NVKECTL SITE_DEPLOY_PATH_REF SITE_IMAGES SITE_NVKE_CONTROLLER_REPOSITORY \
-        SITE_INPUTS KEEP_SITE
+        SITE_INPUTS KEEP_SITE KEEP_TENANT
       ;;
     # The controller's name is the suite's, not this script's: empty leaves it
     # on nvke-controller, and a release from before the rename needs it named.
     run)
-      echo KEEP_SITE DRY_RUN SITE_TENANT_EXCLUDE SITE_STAGE SITE_NVKE_CONTROLLER_VERSION CLI_VERSION \
+      echo KEEP_SITE KEEP_TENANT DRY_RUN SITE_TENANT_EXCLUDE SITE_STAGE SITE_NVKE_CONTROLLER_VERSION CLI_VERSION \
         CAPI_PROVISIONED_VERSION OS_IMAGE_VERSIONS CAPABILITIES SITE_ENVIRONMENT \
         NVKE_CONTROLLER_NAMESPACE NVKE_CONTROLLER_SERVICE
       ;;
@@ -295,13 +296,17 @@ check_viable() {
   local images
   case "${SITE_IMAGE_REGISTRY}" in
     ghcr) images="ghcr.io/dsx-ai-factory/nvke" ;;
+    # Nothing is pulled: every image is built here and reaches the node in
+    # an archive, so the prefix only has to be a name no registry answers
+    # to. check_local_images refuses a run that would pull one anyway.
+    local) images="localhost/nvke" ;;
     nvcr)
       if [ -z "${QUALIFY_E2E_NGC_ORG:-}" ] || [ -z "${NGC_API_KEY:-}" ]; then
         fail "image-registry nvcr needs the QUALIFY_E2E_NGC_ORG repository variable and the NGC_API_KEY secret"
       fi
       images="nvcr.io/${QUALIFY_E2E_NGC_ORG}"
       ;;
-    *) fail "image-registry ${SITE_IMAGE_REGISTRY} is not ghcr or nvcr" ;;
+    *) fail "image-registry ${SITE_IMAGE_REGISTRY} is not ghcr, nvcr or local" ;;
   esac
   emit SITE_IMAGES "${images}"
   say "stage=${SITE_STAGE} controller=${SITE_NVKE_CONTROLLER_VERSION} images=${images}"
@@ -316,14 +321,6 @@ resolve_capabilities() {
     amd64 | arm64) ;;
     *) fail "arch is ${arch}, which is neither amd64 nor arm64" ;;
   esac
-  # SITE_NVKE_CONTROLLER_BUILD, not SITE_NVKE_CONTROLLER_VERSION: the resolve
-  # step above writes a commit into the version when none was given,
-  # so the version is never empty by here. The build flag is what
-  # records that the image is built from this checkout, which is the
-  # amd64-only path.
-  if [ "${arch}" != amd64 ] && [ "${SITE_NVKE_CONTROLLER_BUILD}" = 1 ]; then
-    fail "arch=${arch} needs controller-version set: building the controller image here is amd64-only"
-  fi
   emit SITE_ARCH "${arch}"
 
   # The stream names a provider; this names the file that describes
@@ -442,11 +439,41 @@ resolve_nvkectl() {
   say "staging the published nvkectl ${CLI_VERSION} from ${ref}"
 }
 
+# Built as the controller is when no version is named: from this checkout,
+# tagged with and reporting the commit under test, which is what the suite
+# is told to expect of the provider it finds running.
+resolve_provisioned() {
+  if [ -z "${CAPI_PROVISIONED_VERSION}" ]; then
+    local version
+    version="$(git rev-parse --short=12 HEAD)"
+    emit SITE_PROVISIONED_BUILD 1
+    emit CAPI_PROVISIONED_VERSION "${version}"
+    say "building capi-provisioned from ${version}"
+    return
+  fi
+  emit SITE_PROVISIONED_BUILD 0
+}
+
+# A local registry is a name, not a place: an image that is not built has
+# nowhere to come from, and would fail at the pull in site-inputs instead.
+check_local_images() {
+  [ "${SITE_IMAGE_REGISTRY}" = local ] || return 0
+  local pulled=()
+  [ "${SITE_NVKE_CONTROLLER_BUILD}" = 1 ] || pulled+=(controller)
+  [ "${SITE_CLI_BUILD}" = 1 ] || pulled+=(cli)
+  [ "${SITE_PROVISIONED_BUILD}" = 1 ] || pulled+=(capi-provisioned)
+  if [ "${#pulled[@]}" -gt 0 ]; then
+    fail "image-registry local builds every image, but ${pulled[*]} would be pulled; name no version for them"
+  fi
+}
+
 step_resolve() {
   resolve_controller
+  resolve_provisioned
   check_viable
   resolve_capabilities
   resolve_nvkectl
+  check_local_images
 }
 
 # nvke-controller is the name everywhere now, but GHCR keeps releases from
@@ -472,9 +499,9 @@ step_controller_image() {
 # nvkectl for the node's architecture, the three image archives, and the
 # deploy path out of the checkout. The node has no access to this
 # repository, so everything it runs has to be built here and staged.
-# SITE_NVKE_CONTROLLER_BUILD and SITE_CLI_BUILD come from the resolve step
-# and decide whether the controller archive and nvkectl are built here or were
-# published.
+# SITE_NVKE_CONTROLLER_BUILD, SITE_PROVISIONED_BUILD and SITE_CLI_BUILD come
+# from the resolve step and decide whether the controller and capi-provisioned
+# archives and nvkectl are built here or were published.
 step_site_inputs() {
   make -C controller/test/e2e site-inputs \
     SITE_NVKE_CONTROLLER_VERSION="${SITE_NVKE_CONTROLLER_VERSION}" \
@@ -485,6 +512,7 @@ step_site_inputs() {
     SITE_CLI_VERSION="${CLI_VERSION}" \
     SITE_IMAGE_REGISTRY="${SITE_IMAGES}" \
     SITE_PROVISIONED_VERSION="${CAPI_PROVISIONED_VERSION}" \
+    SITE_PROVISIONED_BUILD="${SITE_PROVISIONED_BUILD}" \
     SITE_INPUTS="${SITE_INPUTS}"
 }
 
@@ -537,8 +565,12 @@ site:
 EOF
   # -e2e.keep-site holds only the site node. The tenant's own cleanup
   # still deletes a failed tenant's cluster, which releases the very
-  # instances the site was kept to look at.
-  if [ "${KEEP_SITE:-}" = "true" ]; then
+  # instances the site was kept to look at. skipDelete keeps every tenant,
+  # passed or not, and the site with them, since it owns their instances;
+  # it also skips the spec that deletes the tenant.
+  if [ "${KEEP_TENANT:-}" = "true" ]; then
+    printf 'lifecycle:\n  skipDelete: true\n' >>"${config}"
+  elif [ "${KEEP_SITE:-}" = "true" ]; then
     printf 'lifecycle:\n  preserveOnFailure: true\n' >>"${config}"
   fi
   say "--- ${E2E_CONFIG} ---"
@@ -585,6 +617,9 @@ step_run() {
     keep=(-e2e.keep-site)
     warn "-e2e.keep-site is set; the site node, and a failed tenant's nodes, survive this run and must be deleted by hand"
   fi
+  if [ "${KEEP_TENANT:-}" = "true" ]; then
+    warn "lifecycle.skipDelete is set; every tenant and the site node survive this run and must be deleted by hand, and tenant deletion is not tested"
+  fi
   # -v so a green run keeps its output. Without it `go test` buffers a
   # passing package's stdout and throws it away, which is what run
   # 36033032946 did: the first successful bootstrap on hardware, and
@@ -622,6 +657,7 @@ step_run() {
       echo "  -e2e.versions=${versions}"
       echo "  -e2e.capabilities=${CAPABILITIES}"
       echo "  keep: ${keep[*]:-no}"
+      echo "  keep tenants: ${KEEP_TENANT}"
     } | tee qualify-e2e.log
     return
   fi
@@ -691,18 +727,24 @@ step_artifacts() {
 step="${1:-}"
 [ "$#" -gt 0 ] && shift
 require_inputs "${step}"
-case "${step}" in
-  matrix) step_matrix "$@" ;;
-  stream-env) step_stream_env "$@" ;;
-  resolve) step_resolve ;;
-  controller-image) step_controller_image ;;
-  site-inputs) step_site_inputs ;;
-  config) step_config ;;
-  run) step_run ;;
-  withhold) step_withhold "$@" ;;
-  artifacts) step_artifacts ;;
-  *)
-    sed -n '5,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
-    exit 2
-    ;;
-esac
+# One braced group ending in exit, so bash has parsed all of it before the
+# step starts. bash reads a script as it runs it: a step that outlives an
+# edit to this file would otherwise resume at its old offset in the new one.
+{
+  case "${step}" in
+    matrix) step_matrix "$@" ;;
+    stream-env) step_stream_env "$@" ;;
+    resolve) step_resolve ;;
+    controller-image) step_controller_image ;;
+    site-inputs) step_site_inputs ;;
+    config) step_config ;;
+    run) step_run ;;
+    withhold) step_withhold "$@" ;;
+    artifacts) step_artifacts ;;
+    *)
+      sed -n '5,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+      exit 2
+      ;;
+  esac
+  exit
+}
