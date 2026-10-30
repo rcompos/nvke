@@ -45,12 +45,12 @@ SITE_PROVISIONED_VERSION ?= v0.1.0-rc.1
 # username is the literal $oauthtoken.
 #
 # The controller is nvke-controller on both registries. GHCR also holds
-# releases from before the rename under nke-controller; qualify-e2e.yml probes
+# releases from before the rename under nke-controller; hack/qualify-lane.sh probes
 # for the tag and passes SITE_NVKE_CONTROLLER_REPOSITORY, and a local run of
 # one of those tags sets it by hand. capi-provisioned carries the same name on
 # both.
 #
-# The controller name also has to match what qualify-e2e.yml writes into the
+# The controller name also has to match what hack/qualify-lane.sh writes into the
 # e2e config as site.images.controller.repository. The node's containerd knows
 # the image only by the name inside controller.tar, so a disagreement leaves
 # the Helm values asking for an image that is not on the node.
