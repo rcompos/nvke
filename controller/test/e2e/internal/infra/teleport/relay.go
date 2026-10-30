@@ -56,6 +56,40 @@ func (d *Dialer) tshRelay(ctx context.Context, jumpHost, address string) (net.Co
 	return startRelay(exec.CommandContext(context.WithoutCancel(ctx), binary, d.tshArgs(jumpHost, relayCommand(address))...))
 }
 
+// checkTimeout bounds CheckJumpHost. An expired personal login makes tsh ask
+// for a browser sign-in, which this leaves time to finish.
+const checkTimeout = 2 * time.Minute
+
+// CheckJumpHost runs a no-op on the jump host through tsh, so a login that is
+// expired, wrong or not allowed there fails before a machine is created
+// rather than after one is waiting to be reached. A dialer that jumps over
+// plain SSH does not use tsh, and has nothing to check here.
+func (d *Dialer) CheckJumpHost(ctx context.Context, jumpHost string) error {
+	if d.relay != nil {
+		return nil
+	}
+	if jumpHost == "" {
+		return fmt.Errorf("no jump host: the site's jumpHost is empty")
+	}
+	binary := d.TSH
+	if binary == "" {
+		binary = "tsh"
+	}
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	var stderr boundedBuffer
+	cmd := exec.CommandContext(ctx, binary, d.tshArgs(jumpHost, "true")...)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		login := d.Login
+		if login == "" {
+			login = "tsh's default login"
+		}
+		return fmt.Errorf("cannot reach the jump host as %s through Teleport (check tsh login and the site's teleportLogin): %w%s", login, err, suffix(stderr.String()))
+	}
+	return nil
+}
+
 func startRelay(cmd *exec.Cmd) (*processConn, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
