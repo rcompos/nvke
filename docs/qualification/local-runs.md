@@ -97,21 +97,71 @@ serial console.
 
 ## What it needs from your shell
 
-The same names the workflow's job puts in its environment:
+A run reads the same names the workflow's job puts in its environment, from
+the shell that starts it.
 
-- The Forge identifiers and `FORGE_API_KEY` that `environments/forge.yaml`
-  reads, and the site's `*_JUMP_HOST` and `*_TELEPORT_LOGIN`.
-- `FORGE_TELEPORT_PROXY`, taken for `TELEPORT_PROXY`, and a current
-  `tsh login`. The run checks `tsh status` after planning and before verify,
-  which asks the CDN through the jump host; a dry run is checked too.
-- For NVCR, `NGC_API_KEY` and `QUALIFY_E2E_NGC_ORG`; for GHCR, `GITHUB_ACTOR`
-  and `GITHUB_TOKEN`; and `docker login` to that registry. `--from-source`
-  needs none of these.
-- `QUALIFY_E2E_NODE_USER` when the OS image bakes an account other than the
-  OSS images'.
-- `bash`, `jq`, `git`, `make`, `docker` and `tsh` on `PATH`, checked before
-  anything runs, and `oras` when nvkectl is pulled rather than built, which is
-  not checked up front.
+### Tools
+
+| Tool | Used for | Checked up front |
+|---|---|---|
+| `go` | Running `qualify local` itself, and building nvkectl from the checkout | Needed to start |
+| `bash`, `jq` | The lane script, `controller/test/e2e/hack/qualify-lane.sh` | Yes |
+| `git` | Planning from upstream's tags, and describing what was built | Yes |
+| `make` | Building nvkectl and the site inputs | Yes |
+| `docker` | Building the site images, and pulling them unless every one is built. The controller image cross-compiles for the site's architecture, which needs BuildKit (Docker Desktop's default) | Yes |
+| `tsh` | Reaching the site's jump host through Teleport | Yes |
+| `oras` | Pulling nvkectl when it is not built | No; only that path needs it |
+
+### Teleport
+
+| Name | Required | What it is |
+|---|---|---|
+| `FORGE_TELEPORT_PROXY` | Yes, unless `TELEPORT_PROXY` is set | The Teleport proxy. It is passed on as `TELEPORT_PROXY` unless that is already set. |
+| A current `tsh login` | Yes | Checked with `tsh status` after planning and before verify, which asks the CDN through the jump host. A dry run is checked too. The login must last the whole run: the suite opens relays until the end, teardown included, and a `full` run is about an hour plus builds. Ask for a longer one with `tsh login --ttl=<minutes>` if yours is short. |
+
+### Forge
+
+`environments/forge.yaml` reads these. An unset or empty variable is an
+error, so every site-1 id is required on every run, a GB200 run included. The
+jump hosts and Teleport logins default to empty, and a site run stops on an
+empty jump host before a machine exists. Site-2 is skipped unless all of its
+ids are set, and a GB200 stream needs it.
+
+| Name | Site | What it is |
+|---|---|---|
+| `FORGE_API_KEY` | All | The Forge API key. Secret; read by the suite. |
+| `FORGE_ORG_ID` | All | The Forge org the machines are created in |
+| `FORGE_SITE_ID`, `FORGE_VPC_ID`, `FORGE_SUBNET_ID` | site-1 | The site, and the VPC and subnet its machines attach to |
+| `FORGE_SSH_KEY_GROUP_ID` | site-1 | The key group for serial console access. It grants no shell on a node. |
+| `FORGE_INSTANCE_TYPE_CPU_ID`, `FORGE_INSTANCE_TYPE_GPU_ID` | site-1 | The CPU and GPU (L40S) machine types |
+| `FORGE_JUMP_HOST`, `FORGE_TELEPORT_LOGIN` | site-1 | The jump host in front of the machines, and your Teleport login on it (one of the Logins `tsh status` lists) |
+| `FORGE_SITE_2_SITE_ID`, `FORGE_SITE_2_VPC_ID`, `FORGE_SITE_2_VPC_PREFIX_ID` | site-2 | The site, and the VPC and VPC prefix its machines attach to |
+| `FORGE_SITE_2_SSH_KEY_GROUP_ID` | site-2 | As for site-1 |
+| `FORGE_SITE_2_INSTANCE_TYPE_CPU_AMD64_ID`, `FORGE_SITE_2_INSTANCE_TYPE_CPU_ARM64_ID`, `FORGE_SITE_2_INSTANCE_TYPE_GPU_GB200_ID` | site-2 | The machine types: a site controller of either architecture, and the arm64 GB200 tenant |
+| `FORGE_SITE_2_JUMP_HOST`, `FORGE_SITE_2_TELEPORT_LOGIN` | site-2 | As for site-1 |
+
+### Registry
+
+Where the site images come from is set by `--registry`.
+
+| `--registry` | Needs |
+|---|---|
+| `nvcr`, the default | `NGC_API_KEY`, `QUALIFY_E2E_NGC_ORG` (or `--ngc-org`), and `docker login nvcr.io` |
+| `ghcr` | `GITHUB_ACTOR`, `GITHUB_TOKEN`, and `docker login ghcr.io` |
+| `local`, the default with `--from-source` | Nothing; every image is built |
+
+Planning needs `QUALIFY_E2E_NGC_ORG` whatever the registry, because
+`release/registry.yaml` names the artifacts by it. A run given `--plan` and
+`--from-source` does not plan, and needs none of these.
+
+### Optional
+
+| Name | Default | What it changes |
+|---|---|---|
+| `QUALIFY_E2E_NODE_USER` (or `--node-user`) | The OSS images' account | The account the OS image bakes. Set it for an image from another pipeline. |
+| `QUALIFY_E2E_SITE_CONTROLLER_VERSION` | The plan's controller | The site controller version, in place of the one the plan names |
+| `SITE_DEPLOY_PATH_REF` | The controller's commit | The commit the deploy path is exported from |
+| `NVKE_CONTROLLER_NAMESPACE`, `NVKE_CONTROLLER_SERVICE` | `nvke-controller` | The name the controller is installed under. A release cut before the rename uses `nke-controller`. |
 
 Keep the values in a file of your own outside the repository and source it;
 none of them is checked in.
@@ -120,17 +170,20 @@ none of them is checked in.
 
 By default, a new directory under the user cache:
 `~/Library/Caches/nvke/qualify-local/<time>-<stream>/` on macOS,
-`~/.cache/nvke/qualify-local/<time>-<stream>/` on Linux. It holds `plan.json`,
-`lane.env` (what each step resolved), `e2e-config.yaml`, `site-inputs/`,
-`qualify-e2e.log`, the JUnit and JSON reports, any diagnostics, and
-`qualify-result.json`. The jump hosts and the token issuer are scrubbed from
-the log, the reports and the diagnostics before they are moved there.
+`~/.cache/nvke/qualify-local/<time>-<stream>/` on Linux. It holds `plan.json`
+(unless `--plan` named one), `lane.env` (what each step resolved),
+`e2e-config.yaml`, `site-inputs/`, `qualify-e2e.log`, the JUnit and JSON
+reports, any diagnostics, and `qualify-result.json`. A dry run writes no
+`e2e-config.yaml` and no result. The jump hosts and the token issuer are
+scrubbed from the log, the reports and the diagnostics before they are moved
+there.
 
 When anything was built, the result is written from `plan-as-run.json`: the
 plan with each built component naming the commit it was built at, so the
 result records what ran rather than what the plan would have pulled. A build
 takes the working tree, uncommitted changes included, and is named for
-`HEAD`; the resolve step warns when the two differ.
+`HEAD`. The resolve step warns when a tracked file differs from `HEAD`; it
+does not look at untracked files, which a build can still pick up.
 
 ## Interrupts
 
@@ -142,9 +195,10 @@ instance would leak.
 ## Planning from a fork
 
 - **Which remote is upstream.** The one whose URL names
-  `dsx-ai-factory/nvke`, whatever it is called. With none, `qualify local`
-  stops before it creates the run directory and says to
-  `git remote add upstream https://github.com/dsx-ai-factory/nvke.git`.
+  `dsx-ai-factory/nvke`, whatever it is called. It is needed even with
+  `--plan`, because the resolve step fetches the commits it stages from it.
+  With none, `qualify local` stops before it creates the run directory and
+  says to `git remote add upstream https://github.com/dsx-ai-factory/nvke.git`.
 - **Tags.** `qualify local` fetches upstream's tags before planning, and not
   at all with `--plan`. A tag that exists only locally, or only on your fork,
   can still change the plan; delete it locally if it does.
