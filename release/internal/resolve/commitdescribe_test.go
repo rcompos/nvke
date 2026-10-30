@@ -6,6 +6,7 @@ package resolve
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -209,5 +210,9 @@ func TestUpstreamRemoteIsFoundByURL(t *testing.T) {
 	git(t, dir, "remote", "add", "up", "git@github.com:dsx-ai-factory/nvke")
 	if got, err := UpstreamRemote(dir); err != nil || got != "up" {
 		t.Errorf("UpstreamRemote = %q, %v; want up", got, err)
+	}
+
+	if _, err := UpstreamRemote(filepath.Join(dir, "missing")); err == nil || errors.Is(err, ErrNoUpstreamRemote) {
+		t.Errorf("where git cannot run, UpstreamRemote error = %v; want a failure, not ErrNoUpstreamRemote", err)
 	}
 }

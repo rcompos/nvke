@@ -44,6 +44,7 @@ func TestLoadAcceptsTheGeneratedSiteConfig(t *testing.T) {
 		"SITE_NVKE_CONTROLLER_REPOSITORY=nvke-controller",
 		"SITE_INPUTS=/w/.site-inputs",
 		"KEEP_SITE=true",
+		"KEEP_TENANT=false",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("writing the config: %v\n%s", err, out)

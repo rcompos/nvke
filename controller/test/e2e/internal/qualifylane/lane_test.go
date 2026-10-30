@@ -314,6 +314,9 @@ func TestResolveRefuses(t *testing.T) {
 		{"an unknown registry", "forge-l40s-amd64", map[string]string{"SITE_IMAGE_REGISTRY": "quay"}, nil, "is not ghcr, nvcr or local"},
 		{"local with an image to pull", "forge-l40s-amd64", map[string]string{"SITE_IMAGE_REGISTRY": "local"},
 			map[string]string{"SITE_NVKE_CONTROLLER_VERSION": "", "CLI_VERSION": ""}, "capi-provisioned would be pulled"},
+		{"a workflow plan naming no capi-provisioned", "forge-l40s-amd64", map[string]string{"GITHUB_ACTIONS": "true"},
+			map[string]string{"CAPI_PROVISIONED_VERSION": ""}, "the plan names no capi-provisioned version"},
+		{"a value with a line break", "forge-l40s-amd64", map[string]string{"QUALIFY_E2E_NGC_ORG": "example-org\nBASH_ENV=/tmp/x"}, nil, "has a line break in its value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, sh := range shells(t) {
@@ -410,7 +413,7 @@ func TestWithholdScrubsJumpHostsAndTheIssuer(t *testing.T) {
 	for _, sh := range shells(t) {
 		dir := t.TempDir()
 		text := "through jump-1.example:22 and jump-2.example\nissuer https://issuer.example/ and https://issuer.example\nkept\n"
-		for _, f := range []string{"qualify-e2e.log", "site-cluster-state.txt"} {
+		for _, f := range []string{"qualify-e2e.log", "qualify-e2e.report.json", "site-cluster-state.txt"} {
 			if err := os.WriteFile(filepath.Join(dir, f), []byte(text), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -422,7 +425,7 @@ func TestWithholdScrubsJumpHostsAndTheIssuer(t *testing.T) {
 		})
 		l.step(true, "withhold", dir)
 		want := "through [withheld]:22 and [withheld]\nissuer [withheld] and [withheld]\nkept\n"
-		for _, f := range []string{"qualify-e2e.log", "site-cluster-state.txt"} {
+		for _, f := range []string{"qualify-e2e.log", "qualify-e2e.report.json", "site-cluster-state.txt"} {
 			got, err := os.ReadFile(filepath.Join(dir, f))
 			if err != nil {
 				t.Fatal(err)

@@ -5,12 +5,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dsx-ai-factory/nvke/release/internal/qualification"
 )
 
 // The steps append, so a value resolved twice is read back as the last one,
@@ -65,6 +68,57 @@ func TestResolveBuild(t *testing.T) {
 				t.Errorf("resolveBuild = build %q registry %q, want %q %q", o.build, o.registry, tc.wantBuild, tc.wantRegistry)
 			}
 		})
+	}
+}
+
+// The result is written from what ran: a built component names the commit it
+// was built at and no location, and what was pulled stays as planned.
+func TestWriteAsBuiltNamesWhatRan(t *testing.T) {
+	dir := t.TempDir()
+	planned := qualification.Plan{Subject: "nvke", Version: "v1.0.0", Scope: "full", Combinations: []qualification.Combination{{
+		ID: "c1",
+		Components: []qualification.ComponentVersion{
+			{Name: "controller", Version: "v1.0.0", URL: "oci://example.com/nvke-controller:v1.0.0", VersionStrategy: "gitTag"},
+			{Name: "cli", Version: "v1.0.0", VersionStrategy: "gitTag"},
+		},
+		Dependencies: []qualification.ComponentVersion{{Name: "kube", Version: "1.36.3"}},
+		Streams: []qualification.Stream{{Name: "s1", Dependencies: []qualification.ComponentVersion{
+			{Name: "cli-arm64", URL: "oci://example.com/nvkectl:v1.0.0-linux-arm64"},
+		}}},
+	}}}
+	b, err := json.Marshal(planned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planAt, outAt, envAt := filepath.Join(dir, "plan.json"), filepath.Join(dir, "as-run.json"), filepath.Join(dir, "lane.env")
+	if err := os.WriteFile(planAt, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lane := "SITE_NVKE_CONTROLLER_VERSION=v1.0.0\nSITE_NVKE_CONTROLLER_VERSION=\nSITE_NVKE_CONTROLLER_VERSION=0123456789ab\nCLI_VERSION=v1.0.0\n"
+	if err := os.WriteFile(envAt, []byte(lane), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAsBuilt(planAt, outAt, envAt, []string{"controller"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := qualification.LoadPlan(outAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := got.Combinations[0]
+	want := qualification.ComponentVersion{Name: "controller", Version: "0123456789ab", VersionStrategy: builtStrategy}
+	if c.Components[0] != want {
+		t.Errorf("controller = %+v, want %+v", c.Components[0], want)
+	}
+	if c.Components[1] != planned.Combinations[0].Components[1] || c.Streams[0].Dependencies[0] != planned.Combinations[0].Streams[0].Dependencies[0] {
+		t.Errorf("what was pulled changed: %+v", c)
+	}
+
+	if err := os.WriteFile(envAt, []byte("CLI_VERSION=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAsBuilt(planAt, outAt, envAt, []string{"cli"}); err == nil || !strings.Contains(err.Error(), "recorded no CLI_VERSION") {
+		t.Errorf("writeAsBuilt with no recorded version = %v", err)
 	}
 }
 

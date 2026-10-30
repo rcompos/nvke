@@ -922,8 +922,7 @@ newest CWE on GHCR predates #850 and rejects this checkout's nvkectl at
 "creating the site cluster". `SITE_NVKE_CONTROLLER_BUILD=0` pulls
 `SITE_NVKE_CONTROLLER_VERSION` as a published tag instead, for qualifying a release
 once one is cut past #850. The controller is built for `SITE_ARCH`, either
-architecture; building for the other one than the host's runs under emulation
-and is slow.
+architecture, cross-compiled on the host's.
 
 capi-provisioned is pulled by default. `SITE_PROVISIONED_BUILD=1` builds it from
 the checkout for `SITE_ARCH` instead, tagged and versioned

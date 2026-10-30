@@ -43,6 +43,11 @@ warn() {
   if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::$*"; else echo "warning: $*" >&2; fi
 }
 emit() {
+  # One line per name: a newline in a value would start another assignment
+  # in $GITHUB_ENV, and the steps after this one hold the job's secrets.
+  case "$2" in
+    *$'\n'* | *$'\r'*) fail "$1 has a line break in its value, which cannot be passed on" ;;
+  esac
   printf '%s=%s\n' "$1" "$2" >>"${LANE_ENV}"
   export "$1=$2"
 }
@@ -96,7 +101,7 @@ require_inputs() {
 # are text and so can carry a credential in an error message.
 artifacts=(qualify-e2e.log qualify-e2e.junit.xml qualify-e2e.report.json
   nvkectl-diagnostics.tar.gz tenant-diagnostics.json site-cluster-state.txt)
-scrubbed=(qualify-e2e.log qualify-e2e.junit.xml tenant-diagnostics.json site-cluster-state.txt)
+scrubbed=(qualify-e2e.log qualify-e2e.junit.xml qualify-e2e.report.json tenant-diagnostics.json site-cluster-state.txt)
 
 # One entry per stream of every combination.
 matrix_entries() {
@@ -113,8 +118,8 @@ matrix_entries() {
       | {
           combination: $c.id,
           stream: $s.name,
-          arch: $s.capabilities.arch,
-          provider: $s.capabilities.provider,
+          arch: ($s.capabilities.arch // ""),
+          provider: ($s.capabilities.provider // ""),
           gpu: ($s.capabilities.gpu // ""),
           controller: version($all; "controller"),
           cli: version($all; "cli"),
@@ -255,7 +260,11 @@ resolve_controller() {
     echo "::add-mask::${basic}"
     auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}")
   fi
-  git ${auth[@]+"${auth[@]}"} fetch --no-tags --depth=1 "${LANE_REMOTE:-origin}" "${want}" || fail "${missing}"
+  # A depth in a full clone would make it shallow, which a workstation's
+  # clone has no reason to become.
+  local depth=()
+  [ "$(git rev-parse --is-shallow-repository)" = true ] && depth=(--depth=1)
+  git ${auth[@]+"${auth[@]}"} fetch --no-tags ${depth[@]+"${depth[@]}"} "${LANE_REMOTE:-origin}" "${want}" || fail "${missing}"
 }
 
 # Two checks that each cost a second and each save a run: the ref the
@@ -444,6 +453,9 @@ resolve_nvkectl() {
 # is told to expect of the provider it finds running.
 resolve_provisioned() {
   if [ -z "${CAPI_PROVISIONED_VERSION}" ]; then
+    # The workflow has no input that asks for this build, so an empty
+    # version there is a plan that named none, not a choice.
+    [ -z "${GITHUB_ACTIONS:-}" ] || fail "the plan names no capi-provisioned version"
     local version
     version="$(git rev-parse --short=12 HEAD)"
     emit SITE_PROVISIONED_BUILD 1
@@ -467,6 +479,15 @@ check_local_images() {
   fi
 }
 
+# A build takes the working tree and is named for HEAD, so a change not yet
+# committed runs under a name that does not contain it, and the deploy path,
+# exported from the commit, runs without it.
+warn_uncommitted() {
+  [ "${SITE_NVKE_CONTROLLER_BUILD}${SITE_CLI_BUILD}${SITE_PROVISIONED_BUILD}" != 000 ] || return 0
+  [ -n "$(git status --porcelain --untracked-files=no)" ] || return 0
+  warn "the checkout has uncommitted changes: what is built here carries them under $(git rev-parse --short=12 HEAD)'s name, and the deploy path exported from that commit does not"
+}
+
 step_resolve() {
   resolve_controller
   resolve_provisioned
@@ -474,6 +495,7 @@ step_resolve() {
   resolve_capabilities
   resolve_nvkectl
   check_local_images
+  warn_uncommitted
 }
 
 # nvke-controller is the name everywhere now, but GHCR keeps releases from
@@ -593,7 +615,8 @@ log_to() {
 #                         unwinding, so deferred teardown does NOT run
 #                         and the instance leaks -- reaching this means
 #                         Ginkgo itself is wedged.
-#   timeout-minutes 235   the runner is killed. Same leak, no log.
+#   timeout-minutes       the job's, in qualify-e2e.yml: the runner is
+#                         killed. Same leak, no log.
 #
 # The 70 minutes between the first two is cleanup's, and it is sized
 # against cleanup rather than picked. A cleanup node entered after the
@@ -612,6 +635,9 @@ log_to() {
 # suite off the Teleport relay and onto plain SSH.
 step_run() {
   cd "${e2e}"
+  # A run that was interrupted, or the suite run by hand, leaves its outputs
+  # here, and the artifacts step would collect them as this run's.
+  rm -f "${artifacts[@]}" site-bundle*
   local keep=()
   if [ "${KEEP_SITE:-}" = "true" ]; then
     keep=(-e2e.keep-site)
@@ -708,7 +734,8 @@ step_withhold() {
         # No < or >: in qualify-e2e.junit.xml they would make the
         # report invalid XML, which neither `qualify publish` nor
         # TestGrid can read.
-        sed "s/${value}/[withheld]/g" "${f}" >"${f}.withheld" && mv "${f}.withheld" "${f}"
+        sed "s/${value}/[withheld]/g" "${f}" >"${f}.withheld" || fail "could not scrub ${f}"
+        mv "${f}.withheld" "${f}"
       done
     done
   done < <(compgen -v | grep -E '_JUMP_HOST$|^SSA_ISSUER$' || true)

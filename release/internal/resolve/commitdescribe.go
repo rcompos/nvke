@@ -122,13 +122,23 @@ func originAbbrev(dir string) (int, error) {
 	}
 	cmd := exec.Command("git", "rev-list", "--objects", "--remotes="+remote, "--tags")
 	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
+	var lines lineCounter
+	cmd.Stdout = &lines
+	if err := cmd.Run(); err != nil {
 		return 0, fmt.Errorf("counting the objects a clone of %s holds: %w", remote, err)
 	}
-	n := abbrevFor(bytes.Count(out, []byte("\n")))
+	n := abbrevFor(int(lines))
 	originAbbrevs.Store(dir, n)
 	return n, nil
+}
+
+// lineCounter counts the lines written to it and keeps none of them: a clone
+// lists millions of objects, and only their number matters.
+type lineCounter int
+
+func (c *lineCounter) Write(p []byte) (int, error) {
+	*c += lineCounter(bytes.Count(p, []byte("\n")))
+	return len(p), nil
 }
 
 // UpstreamRepository is the path every publisher clones.
@@ -147,7 +157,10 @@ func UpstreamRemote(dir string) (string, error) {
 	cmd := exec.Command("git", "config", "--get-regexp", `^remote\..*\.url$`)
 	cmd.Dir = dir
 	out, err := cmd.Output()
-	if err != nil && len(out) > 0 {
+	// git config exits 1 when nothing matches, which is a clone with no
+	// remotes; anything else is a failure to read the config at all.
+	var exit *exec.ExitError
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
 		return "", fmt.Errorf("listing the remotes: %w", err)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

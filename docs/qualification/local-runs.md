@@ -14,7 +14,8 @@ You need it when your change comes from a fork. The workflow does not run for
 a fork's pull request, because a fork cannot reach the Forge API key or the
 Teleport join token. With `qualify local` you run the lane yourself, with your
 own credentials. It runs the workflow's own steps rather than a copy of them,
-so a pass is the same evidence a CI run would give.
+so a pass from a clean checkout, with nothing built that CI would pull, is the
+same evidence a CI run would give.
 
 It is also how the lane itself is developed. A change to the workflow's steps
 can be run and debugged from a workstation, with every file the run wrote kept
@@ -101,8 +102,8 @@ The same names the workflow's job puts in its environment:
 - The Forge identifiers and `FORGE_API_KEY` that `environments/forge.yaml`
   reads, and the site's `*_JUMP_HOST` and `*_TELEPORT_LOGIN`.
 - `FORGE_TELEPORT_PROXY`, taken for `TELEPORT_PROXY`, and a current
-  `tsh login`. The run checks `tsh status` after planning and verify, before
-  any step runs; `--dry-run` skips the check.
+  `tsh login`. The run checks `tsh status` after planning and before verify,
+  which asks the CDN through the jump host; a dry run is checked too.
 - For NVCR, `NGC_API_KEY` and `QUALIFY_E2E_NGC_ORG`; for GHCR, `GITHUB_ACTOR`
   and `GITHUB_TOKEN`; and `docker login` to that registry. `--from-source`
   needs none of these.
@@ -122,8 +123,14 @@ By default, a new directory under the user cache:
 `~/.cache/nvke/qualify-local/<time>-<stream>/` on Linux. It holds `plan.json`,
 `lane.env` (what each step resolved), `e2e-config.yaml`, `site-inputs/`,
 `qualify-e2e.log`, the JUnit and JSON reports, any diagnostics, and
-`qualify-result.json`. Credentials are scrubbed before the files are moved
-there.
+`qualify-result.json`. The jump hosts and the token issuer are scrubbed from
+the log, the reports and the diagnostics before they are moved there.
+
+When anything was built, the result is written from `plan-as-run.json`: the
+plan with each built component naming the commit it was built at, so the
+result records what ran rather than what the plan would have pulled. A build
+takes the working tree, uncommitted changes included, and is named for
+`HEAD`; the resolve step warns when the two differ.
 
 ## Interrupts
 
@@ -150,9 +157,6 @@ instance would leak.
 
 - Two runs from one checkout at once collide: the suite writes its log and
   reports in `controller/test/e2e/` before they are moved.
-- Building an image for the other architecture than the workstation's runs
-  under emulation and is slow, for example an amd64 controller on Apple
-  Silicon.
 - Do not rebase or switch branches in the checkout while a run is going. The
   suite is compiled from it when the `run` step starts, and the site inputs
   are built from it.

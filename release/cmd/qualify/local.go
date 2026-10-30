@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -170,16 +171,15 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 	if err != nil {
 		return err
 	}
+	// Verify asks the CDN through the jump host, and the suite relays as
+	// whoever is logged in, where it cannot prompt for a login that has
+	// lapsed. A dry run verifies too, so it is checked either way.
+	status := exec.CommandContext(ctx, "tsh", "status")
+	if b, err := status.CombinedOutput(); err != nil {
+		return fmt.Errorf("tsh status: %w: %s; run tsh login first", err, strings.TrimSpace(string(b)))
+	}
 	if err := verifyLocal(ctx, out, combo, stream, o.planned(), o.wait); err != nil {
 		return err
-	}
-	if !o.dryRun {
-		// The suite relays through tsh as whoever is logged in, and runs
-		// where it cannot prompt for a login that has lapsed.
-		status := exec.CommandContext(ctx, "tsh", "status")
-		if b, err := status.CombinedOutput(); err != nil {
-			return fmt.Errorf("tsh status: %w: %s; run tsh login first", err, strings.TrimSpace(string(b)))
-		}
 	}
 
 	l := &lane{root: root, out: out, envFile: filepath.Join(o.runDir, "lane.env")}
@@ -248,10 +248,17 @@ func runLocal(ctx context.Context, out io.Writer, o localOptions) error {
 		return runErr
 	}
 
+	resultPlan := planAt
+	if len(o.build) > 0 {
+		resultPlan = filepath.Join(o.runDir, "plan-as-run.json")
+		if err := writeAsBuilt(planAt, resultPlan, l.envFile, o.build); err != nil {
+			return errors.Join(runErr, err)
+		}
+	}
 	result := resultCmd()
 	result.SetOut(out)
 	result.SetArgs([]string{
-		"--plan", planAt,
+		"--plan", resultPlan,
 		"--report", filepath.Join(o.runDir, "qualify-e2e.report.json"),
 		"--combination", combo.ID,
 		"--stream", stream.Name,
@@ -430,8 +437,16 @@ func fromSite(ctx context.Context, host, login, url string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "tsh", "ssh", target,
-		"curl -s -o /dev/null -w '%{http_code}' -I --max-time 30 '"+url+"'").Output()
+	var stderr strings.Builder
+	cmd := exec.CommandContext(ctx, "tsh", "ssh", target,
+		"curl -s -o /dev/null -w '%{http_code}' -I --max-time 30 '"+url+"'")
+	cmd.Stderr = &stderr
+	b, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return strings.TrimSpace(string(b)), err
 }
 
@@ -516,12 +531,108 @@ func (l *lane) collect(dir string) error {
 	if err != nil {
 		return fmt.Errorf("artifacts: %w", err)
 	}
-	for _, path := range strings.Fields(string(b)) {
-		if err := os.Rename(path, filepath.Join(dir, filepath.Base(path))); err != nil {
+	for _, path := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if path == "" {
+			continue
+		}
+		if err := move(path, filepath.Join(dir, filepath.Base(path))); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// move renames src to dst, or copies and removes it where the two are on
+// different volumes, as a --run-dir on another disk is.
+func move(src, dst string) error {
+	err := os.Rename(src, dst)
+	if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+			return err
+		}
+		return os.RemoveAll(src)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
+// builtStrategy is the version strategy recorded for a component built from
+// the checkout, where the plan would name a resolver.
+const builtStrategy = "builtFromCheckout"
+
+// writeAsBuilt copies the plan to outAt with each built component's entries
+// naming the version the run built, which the resolve step recorded, and no
+// location, since nothing was pulled. The result is written from it, so it
+// records what ran rather than what the plan would have pulled.
+func writeAsBuilt(planAt, outAt, envFile string, built []string) error {
+	resolved, err := readEnvFile(envFile)
+	if err != nil {
+		return err
+	}
+	values := map[string]string{}
+	for _, kv := range resolved {
+		k, v, _ := strings.Cut(kv, "=")
+		values[k] = v
+	}
+	versions := map[string]string{}
+	for _, b := range buildable {
+		if !slices.Contains(built, b.name) {
+			continue
+		}
+		v := values[b.version]
+		if v == "" {
+			return fmt.Errorf("the run built %s but recorded no %s", b.name, b.version)
+		}
+		for _, w := range b.planned {
+			versions[w] = v
+		}
+	}
+	p, err := qualification.LoadPlan(planAt)
+	if err != nil {
+		return err
+	}
+	asBuilt := func(entries []qualification.ComponentVersion) {
+		for i := range entries {
+			if v, ok := versions[entries[i].Name]; ok {
+				entries[i] = qualification.ComponentVersion{Name: entries[i].Name, Version: v, VersionStrategy: builtStrategy}
+			}
+		}
+	}
+	for i := range p.Combinations {
+		c := &p.Combinations[i]
+		asBuilt(c.Components)
+		asBuilt(c.Dependencies)
+		for j := range c.Streams {
+			asBuilt(c.Streams[j].Dependencies)
+		}
+	}
+	b, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outAt, append(b, '\n'), 0o600)
 }
 
 // readEnvFile reads the NAME=value lines the steps wrote, later ones last so

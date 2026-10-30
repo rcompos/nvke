@@ -519,9 +519,9 @@ jobs:
       id-token: write
     env:
       # Every knob, resolved once. The versions, the architecture and the GPU
-      # model come from the plan, through this stream's matrix entry. The rest
-      # are this lane's own: a workflow_dispatch fills `inputs`, and a
-      # pull_request run has none, so it takes the QUALIFY_E2E_* repository
+      # model come from the plan, through the "Read the stream from the plan"
+      # step. The rest are this lane's own: a workflow_dispatch fills
+      # `inputs`, and a pull_request run has none, so it takes the QUALIFY_E2E_* repository
       # variables instead. The guard step checks the result rather than
       # letting an empty value surface twenty minutes into a run.
       #
@@ -571,7 +571,7 @@ jobs:
       # plan names, for one stream's environment; qualify-lane.sh says why.
       QUALIFY_E2E_SITE_CONTROLLER_VERSION: ${{ vars.QUALIFY_E2E_SITE_CONTROLLER_VERSION }}
       # The commit the deploy path is exported from. Empty follows the
-      # controller; see the site block in "Write the e2e config".
+      # controller; see deployPathRef in qualify-lane.sh's config step.
       SITE_DEPLOY_PATH_REF: ${{ inputs.deploy-path-ref || vars.QUALIFY_E2E_DEPLOY_PATH_REF }}
       # The name the controller is installed under, which the deploy path
       # decides. Empty leaves the suite on its default, nvke-controller; a
@@ -1027,7 +1027,7 @@ jobs:
           VAR_NVKE_VERSION: ${{ vars.QUALIFY_E2E_NVKE_VERSION }}
           VAR_SCOPE: ${{ vars.QUALIFY_E2E_SCOPE }}
           # What the plan resolved for the whole run. The lane's own values
-          # come from its matrix entry, which is in the env above.
+          # come from the "Read the stream from the plan" step.
           NVKE_VERSION: ${{ needs.plan.outputs.nvke-version }}
           SCOPE: ${{ needs.plan.outputs.scope }}
           STREAM: ${{ matrix.stream }}
@@ -1240,8 +1240,9 @@ jobs:
       # The three nested timeouts, the flags and why each is there are in
       # qualify-lane.sh. timeout-minutes above is the outermost of the three.
       #
-      # environments/forge.yaml declares one site, so the suite resolves it
-      # without being told which.
+      # environments/forge.yaml declares each site with what it provides, and
+      # the suite picks the one the stream's capabilities ask for, so it is
+      # not told which.
       # Marked in a dry run, as the job name is, because the suite is not run.
       - name: Run the e2e suite${{ env.DRY_RUN == 'true' && ' (dry run)' || '' }}
         shell: bash

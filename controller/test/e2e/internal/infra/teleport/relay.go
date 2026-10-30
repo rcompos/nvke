@@ -56,8 +56,10 @@ func (d *Dialer) tshRelay(ctx context.Context, jumpHost, address string) (net.Co
 	return startRelay(exec.CommandContext(context.WithoutCancel(ctx), binary, d.tshArgs(jumpHost, relayCommand(address))...))
 }
 
-// checkTimeout bounds CheckJumpHost. An expired personal login makes tsh ask
-// for a browser sign-in, which this leaves time to finish.
+// checkTimeout bounds CheckJumpHost. An expired personal login makes tsh open
+// a browser sign-in, which reads nothing from stdin and so can finish in this
+// time even under go test. Where no browser can open, as on a runner, the
+// check fails at the timeout instead.
 const checkTimeout = 2 * time.Minute
 
 // CheckJumpHost runs a no-op on the jump host through tsh, so a login that is
