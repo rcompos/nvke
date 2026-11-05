@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The laptop trial, trial/nvke-trial.sh, on a GitHub-hosted runner of each
+# architecture: kind, Cluster API with CAPD, the NVKE site stack built from the
+# checkout, and one tenant cluster. Nothing comes from an NVIDIA registry and
+# the job uses no secrets, so it runs the same on a fork.
+name: Trial
+
+on:
+  push:
+    branches:
+      - "poc/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trial-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trial:
+    name: trial (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      TRIAL_WAIT_MINUTES: "30"
+      MGMT_KUBECONFIG: ${{ github.workspace }}/trial/.state/mgmt.kubeconfig
+      TENANT_KUBECONFIG: ${{ github.workspace }}/trial/.state/tenant.kubeconfig
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The trial's preflight wants 10% of the disk plus 15 GiB free.
+      - name: Free disk space
+        run: |
+          set -Eeuo pipefail
+          df -h /
+          sudo rm -rf -- \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # The management cluster and two tenant nodes each run a containerd that
+      # watches with inotify.
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_instances=1024
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+
+      - name: Read pinned tool versions
+        id: versions
+        run: |
+          {
+            echo "helm_version=$(make --no-print-directory print-HELM_VERSION)"
+            echo "kind_version=$(make --no-print-directory print-KIND_VERSION)"
+            echo "kubectl_version=$(make --no-print-directory print-KUBECTL_VERSION)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ steps.versions.outputs.helm_version }}
+
+      - name: Set up kind and kubectl
+        uses: ./.github/actions/setup-kind
+        with:
+          kind_version: ${{ steps.versions.outputs.kind_version }}
+          kubectl_version: ${{ steps.versions.outputs.kubectl_version }}
+
+      - name: Install jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+
+      - name: Trial up
+        run: trial/nvke-trial.sh up
+
+      - name: Check the tenant
+        run: |
+          set -Eeuo pipefail
+          kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide
+          kubectl --kubeconfig "${TENANT_KUBECONFIG}" wait --for=condition=Ready nodes --all --timeout=5m
+          test "$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes --no-headers | wc -l)" -eq 2
+          kubectl --kubeconfig "${TENANT_KUBECONFIG}" get pods -A
+          trial/nvke-trial.sh status
+
+      # Object lists, events and controller logs only; no kubeconfig and no
+      # Secret leaves the runner.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/trial-diagnostics"
+          mkdir -p "${out}"
+          docker ps -a > "${out}/docker-ps.txt" 2>&1
+          trial/nvke-trial.sh status > "${out}/status.txt" 2>&1
+          if [[ -f "${MGMT_KUBECONFIG}" ]]; then
+            export KUBECONFIG="${MGMT_KUBECONFIG}"
+            kubectl get pods -A -o wide > "${out}/mgmt-pods.txt" 2>&1
+            kubectl get events -A --sort-by=.lastTimestamp > "${out}/mgmt-events.txt" 2>&1
+            kubectl get clusters.cluster.x-k8s.io,machines.cluster.x-k8s.io,dockermachines -A -o wide > "${out}/mgmt-capi.txt" 2>&1
+            for target in nvke-controller/deployment/nvke-controller \
+                          capi-system/deployment/capi-controller-manager \
+                          capd-system/deployment/capd-controller-manager \
+                          capi-kubeadm-control-plane-system/deployment/capi-kubeadm-control-plane-controller-manager; do
+              ns="${target%%/*}"
+              kubectl logs -n "${ns}" "${target#*/}" --all-containers --tail=2000 > "${out}/logs-${ns}.txt" 2>&1
+            done
+          fi
+          if [[ -f "${TENANT_KUBECONFIG}" ]]; then
+            kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide > "${out}/tenant-nodes.txt" 2>&1
+            kubectl --kubeconfig "${TENANT_KUBECONFIG}" get pods -A -o wide > "${out}/tenant-pods.txt" 2>&1
+            kubectl --kubeconfig "${TENANT_KUBECONFIG}" get events -A --sort-by=.lastTimestamp > "${out}/tenant-events.txt" 2>&1
+          fi
+          df -h / > "${out}/disk.txt" 2>&1
+          true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trial-diagnostics-${{ matrix.arch }}
+          path: ${{ runner.temp }}/trial-diagnostics
+          retention-days: 7
+
+      - name: Trial down
+        if: always()
+        run: trial/nvke-trial.sh down
