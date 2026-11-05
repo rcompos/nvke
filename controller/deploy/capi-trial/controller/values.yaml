@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# cloud-workflow-engine values for the nke-stack composition. Merged under the `cloud-workflow-engine` key of the
+# generated chart's values.yaml -- the top-level key is added by the generator,
+# so it is deliberately absent here.
+
+# ─── cloud-workflow-engine ───────────────────────────────────────────────────
+# image.repository/tag are set per run: the trial deploys the controller image
+# it built from the checkout.
+#
+# An installer can still repoint them, which the CAPD e2e depends on: it builds
+# the controller at HEAD and loads it into kind, so it overrides repository and
+# tag and never pulls from a registry. Keeping cloud-workflow-engine a subchart
+# with live values is what makes that possible.
+namespaceOverride: nvke-controller
