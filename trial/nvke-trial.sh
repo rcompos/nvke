@@ -180,7 +180,10 @@ build() {
 
   if [[ "${REBUILD}" == 1 ]] || ! image_exists "${CONTROLLER_IMAGE}"; then
     log "building the controller image ${CONTROLLER_IMAGE}"
-    gmk controller docker-build-local LOCAL_PLATFORM="linux/${DOCKER_ARCH}" IMG="${CONTROLLER_IMAGE}"
+    # The controller Makefile takes GIT_VERSION from GitLab's CI_COMMIT_SHA
+    # whenever CI is set, which leaves it empty under GitHub Actions.
+    gmk controller docker-build-local LOCAL_PLATFORM="linux/${DOCKER_ARCH}" IMG="${CONTROLLER_IMAGE}" \
+      GIT_VERSION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
   else
     log "controller image ${CONTROLLER_IMAGE}: already built"
   fi

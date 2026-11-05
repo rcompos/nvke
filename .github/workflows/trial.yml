@@ -109,7 +109,8 @@ jobs:
       - name: Collect diagnostics
         if: failure()
         run: |
-          set -uo pipefail
+          # Collect what exists: a failed command must not end the step.
+          set +e -uo pipefail
           out="${RUNNER_TEMP}/trial-diagnostics"
           mkdir -p "${out}"
           docker ps -a > "${out}/docker-ps.txt" 2>&1
