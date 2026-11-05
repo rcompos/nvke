@@ -318,7 +318,17 @@ tenant_kubeconfig() {
     tenant_reachable || die "the tenant API is not reachable with ${TENANT_KUBECONFIG}"
   fi
 
-  log "waiting for the tenant's nodes to be Ready"
+  # `kubectl wait --all` only covers nodes that have registered, so first wait
+  # for one node per CAPI machine.
+  local want have deadline=$(($(date +%s) + 600))
+  want="$(kubectl get machines.cluster.x-k8s.io -A --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  log "waiting for the tenant's ${want} nodes to register and be Ready"
+  while :; do
+    have="$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    ((have >= want)) && break
+    [[ "$(date +%s)" -ge "${deadline}" ]] && die "only ${have} of ${want} tenant nodes registered in 10 minutes"
+    sleep 10
+  done
   kubectl --kubeconfig "${TENANT_KUBECONFIG}" wait --for=condition=Ready nodes --all --timeout=10m
   kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide
 }
@@ -384,7 +394,15 @@ cmd_down() {
     kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
     local capi
     capi="$(capi_cluster_name || true)"
-    [[ -n "${capi}" ]] && printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
+    if [[ -n "${capi}" ]]; then
+      printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
+      # Deleting a control-plane machine rewrites the load balancer's config,
+      # and a Docker restart leaves that container stopped.
+      local stopped
+      stopped="$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${capi}" --filter status=exited)"
+      # shellcheck disable=SC2086
+      [[ -z "${stopped}" ]] || docker start ${stopped} >/dev/null
+    fi
     if [[ -x "${NVKECTL}" ]] && kubectl get deployment -n nvke-controller nvke-controller >/dev/null 2>&1; then
       port_forward
       register_site
