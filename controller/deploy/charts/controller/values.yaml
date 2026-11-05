@@ -83,8 +83,10 @@ controllers:
     # -- Run the Kubernetes-native bootstrap controllers. Each runs only for Machines that opt in by label.
     enabled: false
   nico:
-    # -- Run controllers that watch NICo infrastructure resources.
-    enabled: true
+    # -- Run controllers that watch NICo infrastructure resources. They need CAPNICo's NicoMachine CRD.
+    # Unset, they run when `supportedInfraProviders` lists `nico`. A site that drops `nico` from that list
+    # while it still has NICo clusters must set this to true, or those clusters lose these controllers.
+    enabled: null
 
 nodeAgent:
   readiness:
@@ -427,8 +429,9 @@ capi:
     # -- Create RBAC for the controller to watch and patch CAPI-backed infrastructure resources.
     create: false
     # -- Grant RBAC for NICo's CRDs (nicoclusters, nicomachines). Only applies when `create` is true.
-    # Setting it false requires `controllers.nico.enabled: false`.
-    nico: true
+    # Unset, it is granted when `supportedInfraProviders` lists `nico` or the NICo controllers run
+    # (`controllers.nico.enabled`). Setting it false requires both to be false.
+    nico: null
     # -- Grant RBAC for LaunchLayer's CRDs (launchlayerclusters, launchlayermachines,
     # launchlayermachinetemplates). Only applies when `create` is true.
     # Keep it true while CAPLL's CRDs are installed.

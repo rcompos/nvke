@@ -1,4 +1,8 @@
-{{- if and .Values.capi.rbac.create .Values.capi.rbac.nico }}
+{{- $nico := .Values.capi.rbac.nico }}
+{{- if or (kindIs "invalid" $nico) (eq (toString $nico) "") }}
+{{- $nico = or (eq (include "controller.nicoListed" .) "true") (eq (include "controller.nicoControllersEnabled" .) "true") }}
+{{- end }}
+{{- if and .Values.capi.rbac.create $nico }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

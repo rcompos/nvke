@@ -1057,8 +1057,8 @@ runner_exec env CLUSTER_TOPOLOGY=true clusterctl init \
   --infrastructure "docker:${CAPD_PROVIDER_VERSION}"
 runner_exec kubectl rollout status deployment/capi-controller-manager -n capi-system --timeout=5m
 runner_exec kubectl rollout status deployment/capd-controller-manager -n capd-system --timeout=5m
-# On the deploy path these are the capnico-crds item, vendored at the ref
-# controller/go.mod pins, so applying them here too would give them two owners.
+# The deploy path installs none: its controller lists only infra, so the chart
+# leaves the NICo controllers, which need these CRDs, off.
 if [[ -n "${CAPNICO_SOURCE_SRC:-}" && "${NICO_PROVIDER_ENABLED}" != true \
       && "${NKE_E2E_USE_STACK:-false}" != "true" ]]; then
   log "installing CAPNICo CRDs"

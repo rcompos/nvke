@@ -1084,9 +1084,9 @@ _controller_spire_attestation_method = os.getenv(
     "NODE_AGENT_SPIRE_ATTESTATION_METHOD",
     _tilt_env.get("NODE_AGENT_SPIRE_ATTESTATION_METHOD", ""))
 
-# The chart defaults controllers.nico.enabled to true. Only the nico and
-# nico-vm providers install the NicoMachine CRD, and the controller exits
-# when the flag is true without that CRD.
+# Set rather than left to the chart, which follows supportedInfraProviders:
+# only the nico and nico-vm providers install the NicoMachine CRD, and the
+# controller exits when the flag is true without that CRD.
 _nico_controllers_enabled = "nico" in _provider_names or "nico-vm" in _provider_names
 
 _controller_chart_flags = [

@@ -191,6 +191,32 @@ controller treats an empty variable. sprig's default would also replace false an
 {{- end }}
 
 {{/*
+"true" or "false": whether supportedInfraProviders lists nico.
+*/}}
+{{- define "controller.nicoListed" -}}
+{{- $listed := false -}}
+{{- range splitList "," (.Values.supportedInfraProviders | default "nico") -}}
+{{- if eq (trim .) "nico" -}}
+{{- $listed = true -}}
+{{- end -}}
+{{- end -}}
+{{- $listed -}}
+{{- end }}
+
+{{/*
+"true" or "false": controllers.nico.enabled when it is set, otherwise whether
+supportedInfraProviders lists nico.
+*/}}
+{{- define "controller.nicoControllersEnabled" -}}
+{{- $enabled := .Values.controllers.nico.enabled -}}
+{{- if or (kindIs "invalid" $enabled) (eq (toString $enabled) "") -}}
+{{- include "controller.nicoListed" . -}}
+{{- else -}}
+{{- $enabled -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 A Go duration string in nanoseconds, the unit of time.Duration; refuses the
 render if it does not parse, as the controller would refuse it at startup.
 */}}

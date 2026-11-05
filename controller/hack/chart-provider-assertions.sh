@@ -83,6 +83,26 @@ clusterrole "omits NICo RBAC when capi.rbac.nico is false" nico 0 "${out}"
 out="$(render --set capi.rbac.create=true --set capi.rbac.launchLayer=false)"
 clusterrole "omits LaunchLayer RBAC when capi.rbac.launchLayer is false" launchlayer 0 "${out}"
 
+echo "NICo controllers follow the provider list:"
+out="$(render --set capi.rbac.create=true)"
+setting "on by default, which lists nico" nicoControllersEnabled true "${out}"
+out="$(render --set capi.rbac.create=true --set-string 'supportedInfraProviders=infra\, nico')"
+setting "on when nico is listed with another provider" nicoControllersEnabled true "${out}"
+clusterrole "grants NICo RBAC when nico is listed with another provider" nico 1 "${out}"
+out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=infra)"
+setting "off when nico is not listed" nicoControllersEnabled false "${out}"
+clusterrole "omits NICo RBAC when nico is not listed" nico 0 "${out}"
+out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=infra --set controllers.nico.enabled=true)"
+setting "on when set, even with nico not listed" nicoControllersEnabled true "${out}"
+clusterrole "grants NICo RBAC when the controllers are set on" nico 1 "${out}"
+out="$(render --set capi.rbac.create=true --set controllers.nico.enabled=false)"
+setting "off when set, even with nico listed" nicoControllersEnabled false "${out}"
+clusterrole "keeps NICo RBAC for the listed provider with the controllers set off" nico 1 "${out}"
+out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=infra --set controllers.nico.enabled=false)"
+clusterrole "omits NICo RBAC with nico not listed and the controllers set off" nico 0 "${out}"
+out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=infra --set capi.rbac.nico=true)"
+clusterrole "grants NICo RBAC when capi.rbac.nico is set, whatever the controllers" nico 1 "${out}"
+
 if [[ "${failures}" -ne 0 ]]; then
   echo "${failures} chart provider assertion(s) failed" >&2
   exit 1

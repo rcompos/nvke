@@ -45,11 +45,6 @@ supportedInfraProviders: infra
 capi:
   rbac:
     create: true
-    nico: false
-
-controllers:
-  nico:
-    enabled: false
 
 # DockerCluster fronts the API with its own load balancer container, so the
 # trial runs without kube-vip and its BGP peer.
