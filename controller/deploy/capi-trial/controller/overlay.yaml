@@ -45,6 +45,14 @@ supportedInfraProviders: infra
 capi:
   rbac:
     create: true
+    # CAPD's kinds, which the controller applies from each request's infra block.
+    infrastructureResources:
+      - dockerclusters
+      - dockerclustertemplates
+      - dockermachines
+      - dockermachinetemplates
+      - dockermachinepools
+      - dockermachinepooltemplates
 
 # DockerCluster fronts the API with its own load balancer container, so the
 # trial runs without kube-vip and its BGP peer.

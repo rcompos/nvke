@@ -1,0 +1,75 @@
+{{- if .Values.capi.rbac.create }}
+{{- $resources := list }}
+{{- range .Values.capi.rbac.infrastructureResources }}
+{{- $resource := toString . }}
+{{- if not (regexMatch "^[a-z0-9]+$" $resource) }}
+{{- fail (printf "capi.rbac.infrastructureResources: %q is not a plural resource name such as dockermachines" $resource) }}
+{{- end }}
+{{- if has $resource $resources }}
+{{- fail (printf "capi.rbac.infrastructureResources: %q is listed more than once" $resource) }}
+{{- end }}
+{{- $resources = append $resources $resource }}
+{{- end }}
+{{- /* A user's infrastructure provider adds its kinds here with a ClusterRole
+that carries the aggregation label, or through capi.rbac.infrastructureResources. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "controller.fullname" . }}-infrastructure
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        {{ include "controller.infrastructureAggregationLabel" . }}: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "controller.fullname" . }}-infrastructure
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "controller.fullname" . }}-infrastructure
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "controller.serviceAccountName" . }}
+    namespace: {{ include "controller.namespace" . }}
+{{- with $resources }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "controller.fullname" $ }}-infrastructure-resources
+  labels:
+    {{- include "controller.labels" $ | nindent 4 }}
+    {{ include "controller.infrastructureAggregationLabel" $ }}: "true"
+rules:
+  - apiGroups:
+      - infrastructure.cluster.x-k8s.io
+    resources:
+      {{- range . }}
+      - {{ . }}
+      {{- end }}
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - watch
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    resourceNames:
+      {{- range . }}
+      - {{ . }}.infrastructure.cluster.x-k8s.io
+      {{- end }}
+    verbs:
+      - get
+{{- end }}
+{{- end }}

@@ -191,6 +191,14 @@ controller treats an empty variable. sprig's default would also replace false an
 {{- end }}
 
 {{/*
+The label that adds a ClusterRole's rules to the controller's infrastructure
+ClusterRole.
+*/}}
+{{- define "controller.infrastructureAggregationLabel" -}}
+{{- printf "aggregate-to-%s" (include "controller.fullname" .) | trunc 63 | trimSuffix "-" | printf "nvke.nvidia.com/%s" -}}
+{{- end }}
+
+{{/*
 "true" or "false": whether supportedInfraProviders lists nico.
 */}}
 {{- define "controller.nicoListed" -}}

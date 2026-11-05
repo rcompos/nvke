@@ -436,6 +436,11 @@ capi:
     # launchlayermachinetemplates). Only applies when `create` is true.
     # Keep it true while CAPLL's CRDs are installed.
     launchLayer: true
+    # -- `infrastructure.cluster.x-k8s.io` resources of the user's own infrastructure provider, as plural
+    # names such as `dockerclusters` and `dockermachinetemplates`. The controller gets create, delete, get,
+    # list, patch and watch on them, and get on their CRDs. Only applies when `create` is true. A provider
+    # can grant the same with a ClusterRole labelled `nvke.nvidia.com/aggregate-to-<fullname>: "true"`.
+    infrastructureResources: []
 
 kubeadm:
   # -- OCI registry kubeadm uses for control-plane component images.

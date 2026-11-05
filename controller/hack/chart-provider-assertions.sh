@@ -45,6 +45,16 @@ wantfail() {
   fi
 }
 
+# check <description> <expected> <got>
+check() {
+  if [[ "$3" == "$2" ]]; then
+    printf '  ok    %s\n' "$1"
+  else
+    printf '  FAIL  %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 # clusterrole <description> <name suffix> <expected count> <rendered>
 # Asserts how many ClusterRoles named <fullname>-<suffix> were rendered.
 clusterrole() {
@@ -102,6 +112,32 @@ out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=i
 clusterrole "omits NICo RBAC with nico not listed and the controllers set off" nico 0 "${out}"
 out="$(render --set capi.rbac.create=true --set-string supportedInfraProviders=infra --set capi.rbac.nico=true)"
 clusterrole "grants NICo RBAC when capi.rbac.nico is set, whatever the controllers" nico 1 "${out}"
+
+echo "a user's infrastructure provider:"
+out="$(render)"
+clusterrole "renders no infrastructure ClusterRole without capi.rbac.create" infrastructure 0 "${out}"
+out="$(render --set capi.rbac.create=true)"
+clusterrole "renders the aggregated infrastructure ClusterRole" infrastructure 1 "${out}"
+clusterrole "renders no resources ClusterRole for an empty list" infrastructure-resources 0 "${out}"
+selector="$(yq 'select(.kind == "ClusterRole" and .metadata.name == "cwe-nvke-controller-infrastructure") | .aggregationRule.clusterRoleSelectors[0].matchLabels | to_entries | .[0].key + "=" + .[0].value' <<<"${out}")"
+check "aggregates ClusterRoles labelled for this release" "nvke.nvidia.com/aggregate-to-cwe-nvke-controller=true" "${selector}"
+bound="$(yq 'select(.kind == "ClusterRoleBinding" and .metadata.name == "cwe-nvke-controller-infrastructure") | .roleRef.name + " " + .subjects[0].name' <<<"${out}")"
+check "binds the infrastructure ClusterRole to the controller" "cwe-nvke-controller-infrastructure cloud-workflow-engine" "${bound}"
+out="$(render --set capi.rbac.create=true --set 'capi.rbac.infrastructureResources={dockerclusters,dockermachines}')"
+role='select(.kind == "ClusterRole" and .metadata.name == "cwe-nvke-controller-infrastructure-resources")'
+check "labels the resources ClusterRole for aggregation" "true" \
+  "$(yq "${role} | .metadata.labels[\"nvke.nvidia.com/aggregate-to-cwe-nvke-controller\"]" <<<"${out}")"
+check "grants the listed resources" "dockerclusters,dockermachines" \
+  "$(yq "${role} | .rules[0].resources | join(\",\")" <<<"${out}")"
+check "grants get on the listed resources' CRDs" \
+  "dockerclusters.infrastructure.cluster.x-k8s.io,dockermachines.infrastructure.cluster.x-k8s.io" \
+  "$(yq "${role} | .rules[1].resourceNames | join(\",\")" <<<"${out}")"
+wantfail "rejects a resource that is not a plural name" \
+  'capi.rbac.infrastructureResources: "dockermachines.infrastructure.cluster.x-k8s.io" is not a plural resource name' \
+  --set capi.rbac.create=true --set 'capi.rbac.infrastructureResources={dockermachines.infrastructure.cluster.x-k8s.io}'
+wantfail "rejects a repeated resource" \
+  'capi.rbac.infrastructureResources: "dockermachines" is listed more than once' \
+  --set capi.rbac.create=true --set 'capi.rbac.infrastructureResources={dockermachines,dockermachines}'
 
 if [[ "${failures}" -ne 0 ]]; then
   echo "${failures} chart provider assertion(s) failed" >&2

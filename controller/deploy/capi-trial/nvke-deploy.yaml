@@ -16,7 +16,6 @@ items:
   - {name: spire-server-nodeport, type: manifest}
   - {name: spire-oidc-provider-nodeport, type: manifest}
   - {name: nvke-spire-client, type: manifest}
-  - {name: capd-cwe-rbac, type: manifest}
   - {name: postgresql, type: helm}
   - {name: spire-crds, type: helm}
   - {name: temporal, type: helm}
