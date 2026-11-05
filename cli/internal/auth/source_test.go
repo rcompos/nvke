@@ -5,7 +5,14 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +95,7 @@ func TestTokenUsesCachedToken(t *testing.T) {
 	client := fake.NewClientset()
 	source := &TokenSource{
 		client:   client,
-		endpoint: endpoint,
+		cacheKey: endpoint,
 		cache:    cache,
 	}
 
@@ -125,7 +132,7 @@ func TestTokenRenewsAndCachesNearExpiryToken(t *testing.T) {
 			ExpiresAt: time.Now().Add(tokenRenewBefore),
 		},
 	}}
-	source := &TokenSource{client: client, endpoint: endpoint, cache: cache}
+	source := &TokenSource{client: client, cacheKey: endpoint, cache: cache}
 
 	token, err := source.Mint(t.Context())
 	if err != nil {
@@ -681,4 +688,70 @@ func newExecSource(t *testing.T, opts execSourceOpts) *TokenSource {
 		t.Fatalf("NewTokenSource: %v", err)
 	}
 	return source
+}
+
+// A site rebuilt behind the same endpoint, as `nvke-trial.sh down` then `up`
+// does, has a new cluster CA. Its controller rejects the old cluster's token,
+// so the token cached for the old cluster must not be used for the new one.
+func TestTokenCacheKeyNamesTheManagementCluster(t *testing.T) {
+	const endpoint = "http://127.0.0.1:18080"
+	write := func(name, server string, ca []byte) string {
+		t.Helper()
+		config := clientcmdapi.NewConfig()
+		config.Clusters["c"] = &clientcmdapi.Cluster{Server: server, CertificateAuthorityData: ca}
+		config.AuthInfos["u"] = &clientcmdapi.AuthInfo{Token: "admin"}
+		config.Contexts["c"] = &clientcmdapi.Context{Cluster: "c", AuthInfo: "u"}
+		config.CurrentContext = "c"
+		path := filepath.Join(t.TempDir(), name)
+		if err := clientcmd.WriteToFile(*config, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	key := func(kubeconfig string) string {
+		t.Helper()
+		source, err := NewTokenSource(kubeconfig, endpoint)
+		if err != nil {
+			t.Fatalf("NewTokenSource: %v", err)
+		}
+		return source.cacheKey
+	}
+
+	oldCA, newCA := testCA(t), testCA(t)
+	old := key(write("old", "https://127.0.0.1:6443", oldCA))
+	if again := key(write("again", "https://127.0.0.1:6443", oldCA)); again != old {
+		t.Errorf("the same cluster keys as %q and %q, want one key", old, again)
+	}
+	if rebuilt := key(write("rebuilt", "https://127.0.0.1:6443", newCA)); rebuilt == old {
+		t.Errorf("a rebuilt cluster with a new CA keys as the old one, %q", old)
+	}
+	if moved := key(write("moved", "https://127.0.0.1:7443", oldCA)); moved == old {
+		t.Errorf("another API server keys as the old one, %q", old)
+	}
+	if !strings.HasPrefix(old, endpoint+" ") {
+		t.Errorf("key %q does not start with the endpoint", old)
+	}
+}
+
+// testCA returns a self-signed CA certificate, PEM-encoded.
+func testCA(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "kubernetes"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }

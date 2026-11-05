@@ -6,8 +6,11 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -60,7 +63,7 @@ const (
 type TokenSource struct {
 	client     kubernetes.Interface
 	restConfig *rest.Config
-	endpoint   string
+	cacheKey   string
 	cache      *tokenCache
 
 	mu sync.Mutex
@@ -78,21 +81,38 @@ func NewTokenSource(kubeconfig, endpoint string) (*TokenSource, error) {
 	}
 
 	if useExecToken(restConfig) {
-		return &TokenSource{
-			restConfig: restConfig,
-			endpoint:   endpoint,
-		}, nil
+		return &TokenSource{restConfig: restConfig}, nil
 	}
 
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("building Kubernetes client from kubeconfig %q: %w", kubeconfig, err)
 	}
+	cacheKey, err := tokenCacheKey(endpoint, restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig %q: %w", kubeconfig, err)
+	}
 	return &TokenSource{
 		client:   client,
-		endpoint: endpoint,
+		cacheKey: cacheKey,
 		cache:    loadTokenCache(),
 	}, nil
+}
+
+// tokenCacheKey names a cached token by the controller endpoint and the
+// management cluster that signed it. A site rebuilt behind the same endpoint
+// has a new cluster CA, and its controller rejects the old cluster's tokens.
+func tokenCacheKey(endpoint string, cfg *rest.Config) (string, error) {
+	ca := cfg.CAData
+	if len(ca) == 0 && cfg.CAFile != "" {
+		data, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return "", fmt.Errorf("reading the cluster CA: %w", err)
+		}
+		ca = data
+	}
+	sum := sha256.Sum256(ca)
+	return endpoint + " " + cfg.Host + " " + hex.EncodeToString(sum[:8]), nil
 }
 
 // useExecToken is true only when client-go would actually run oidc-login.
@@ -130,7 +150,7 @@ func (s *TokenSource) Mint(ctx context.Context) (string, error) {
 
 	now := time.Now()
 	if s.cache != nil {
-		if token, ok := s.cache.tokens[s.endpoint]; ok && token.usableAt(now) {
+		if token, ok := s.cache.tokens[s.cacheKey]; ok && token.usableAt(now) {
 			return token.Value, nil
 		}
 	}
@@ -165,7 +185,7 @@ func (s *TokenSource) Mint(ctx context.Context) (string, error) {
 	}
 	if !token.ExpiresAt.IsZero() {
 		if s.cache != nil {
-			s.cache.store(s.endpoint, token)
+			s.cache.store(s.cacheKey, token)
 		}
 	}
 	return response.Status.Token, nil
