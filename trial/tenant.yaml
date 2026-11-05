@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example CreateClusterRequest for a local CAPD (Docker-backed CAPI) cluster.
+# Field names match the controller API exactly — see /api/docs on your management plane.
+#
+# Usage: nvkectl create cluster -f examples/capd-cluster.yaml
+#
+# Prerequisites:
+#   - tilt up running with CAPD enabled
+#   - nvkectl config set-site --url http://localhost:8080
+
+name: trial-1
+controlPlaneKubernetesVersion: 1.34.2
+cniPlugin: calico
+etcdEncrypted: false
+
+controlPlaneConfig:
+  desiredCount: 1
+  systemReservedMemory: "1Gi"
+  infra:
+    preKubeadmCommands:
+      - "mkdir -p /run/cluster-api"
+      - "echo success > /run/cluster-api/bootstrap-success.complete"
+    machineTemplate:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+      kind: DockerMachineTemplate
+      spec:
+        template:
+          spec:
+            customImage: cwe-capd-kindest-node:local
+            extraMounts:
+              - containerPath: /var/run/docker.sock
+                hostPath: /var/run/docker.sock
+
+nodePools:
+  - name: worker
+    nodeNamePrefix: w
+    desiredNodeCount: 1
+    controlPlane: false
+    systemReservedMemory: "1Gi"
+    nodeLabels:
+      tier: compute
+    autoProvisionDisabled: false
+    autoModeDisabled: false
+    recycleBudget: 0
+    infra:
+      preKubeadmCommands:
+        - "mkdir -p /run/cluster-api"
+        - "echo success > /run/cluster-api/bootstrap-success.complete"
+      machineTemplate:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+        kind: DockerMachineTemplate
+        spec:
+          template:
+            spec:
+              customImage: cwe-capd-kindest-node:local
+              extraMounts:
+                - containerPath: /var/run/docker.sock
+                  hostPath: /var/run/docker.sock
+
+infra:
+  cluster:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+    kind: DockerCluster
+    metadata:
+      name: trial-1
+    spec: {}
