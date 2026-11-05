@@ -107,7 +107,8 @@ preflight() {
   arch="$(docker version --format '{{.Server.Arch}}')"
   case "${arch}" in
     arm64 | aarch64) DOCKER_ARCH=arm64 ;;
-    *) die "the trial's node release set is arm64 only; this Docker daemon is ${arch}" ;;
+    amd64 | x86_64) DOCKER_ARCH=amd64 ;;
+    *) die "the trial runs on arm64 or amd64; this Docker daemon is ${arch}" ;;
   esac
 
   check_disk
@@ -120,6 +121,9 @@ preflight() {
 
 management_cluster() {
   log "management cluster: kind ${KIND_CLUSTER_NAME}"
+  if kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null && ! management_running; then
+    die "the management cluster ${KIND_CLUSTER_NAME} exists but is not running, as an interrupted run leaves it; run trial/nvke-trial.sh down, then up"
+  fi
   gmk controller kind-up
   kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
   chmod 0600 "${KUBECONFIG}"
@@ -199,7 +203,7 @@ deploy_stack() {
   STACK_DIR="${REPO_ROOT}" \
   DEPLOY_TARGET=capi-trial \
   NODE_AGENT_SPIRE_ATTESTATION_METHOD=joinToken \
-  NVKE_CONTROLLER_RELEASES_DIR="${TRIAL_DIR}/releases" \
+  NVKE_CONTROLLER_RELEASES_DIR="${TRIAL_DIR}/releases/${DOCKER_ARCH}" \
     bash "${REPO_ROOT}/controller/hack/ci/deploy-stack.sh" "${CONTROLLER_IMAGE}"
 
   # Tenant kubeconfigs authenticate with the SPIRE exec plugin, so every
@@ -391,30 +395,10 @@ cmd_kubeconfig() {
 cmd_down() {
   preflight
   if kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null; then
-    kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
-    local capi
-    capi="$(capi_cluster_name || true)"
-    if [[ -n "${capi}" ]]; then
-      printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
-      # Deleting a control-plane machine rewrites the load balancer's config,
-      # and a Docker restart leaves that container stopped.
-      local stopped
-      stopped="$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${capi}" --filter status=exited)"
-      # shellcheck disable=SC2086
-      [[ -z "${stopped}" ]] || docker start ${stopped} >/dev/null
-    fi
-    if [[ -x "${NVKECTL}" ]] && kubectl get deployment -n nvke-controller nvke-controller >/dev/null 2>&1; then
-      port_forward
-      register_site
-      if tenant_json >/dev/null; then
-        log "deleting tenant $(tenant_name)"
-        nvkectl delete cluster "$(tenant_name)" || true
-        local _
-        for _ in $(seq 1 60); do
-          [[ -z "$(kubectl get clusters.cluster.x-k8s.io -A --no-headers 2>/dev/null)" ]] && break
-          sleep 10
-        done
-      fi
+    if management_running; then
+      delete_tenant
+    else
+      log "the management cluster ${KIND_CLUSTER_NAME} is not running; deleting it without deleting the tenant first"
     fi
     stop_port_forward
     log "deleting the management cluster ${KIND_CLUSTER_NAME}"
@@ -436,6 +420,40 @@ cmd_down() {
   fi
   rm -rf "${STATE_DIR}"
   log "removed. The built images stay in Docker: ${CONTROLLER_IMAGE}, ${NODE_IMAGE}"
+}
+
+# A kind create that was interrupted leaves a node container that never ran
+# kubeadm: kind lists the cluster but has no kubeconfig for it.
+management_running() {
+  kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}" 2>/dev/null &&
+    kubectl get --raw /readyz >/dev/null 2>&1
+}
+
+delete_tenant() {
+  local capi
+  capi="$(capi_cluster_name || true)"
+  if [[ -n "${capi}" ]]; then
+    printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
+    # Deleting a control-plane machine rewrites the load balancer's config,
+    # and a Docker restart leaves that container stopped.
+    local stopped
+    stopped="$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${capi}" --filter status=exited)"
+    # shellcheck disable=SC2086
+    [[ -z "${stopped}" ]] || docker start ${stopped} >/dev/null
+  fi
+  if [[ -x "${NVKECTL}" ]] && kubectl get deployment -n nvke-controller nvke-controller >/dev/null 2>&1; then
+    port_forward
+    register_site
+    if tenant_json >/dev/null; then
+      log "deleting tenant $(tenant_name)"
+      nvkectl delete cluster "$(tenant_name)" || true
+      local _
+      for _ in $(seq 1 60); do
+        [[ -z "$(kubectl get clusters.cluster.x-k8s.io -A --no-headers 2>/dev/null)" ]] && break
+        sleep 10
+      done
+    fi
+  fi
 }
 
 case "${1:-up}" in
