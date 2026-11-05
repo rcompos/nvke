@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Trial NVKE on one machine: a kind management cluster, Cluster API with the
+# Docker infrastructure provider (CAPD), the NVKE site stack built from this
+# checkout, and one tenant cluster created through the generic infra provider.
+# Every NVKE image and binary is built here; nothing is pulled from an NVKE
+# registry.
+#
+# usage: trial/nvke-trial.sh [up|status|kubeconfig|down]
+#
+#   up          build, deploy, create the tenant, and write its kubeconfig
+#   status      show the management plane, the tenant and its containers
+#   kubeconfig  write the tenant kubeconfig again
+#   down        delete the tenant, then the management cluster
+#
+# Every step of `up` skips what already exists, so a failed run can be re-run.
+# Settings (environment):
+#   KIND_CLUSTER_NAME  management cluster name (default nvke-trial)
+#   TRIAL_API_PORT     local port for the NVKE API (default 18080)
+#   TRIAL_WAIT_MINUTES how long to wait for the tenant (default 30)
+#   TRIAL_REBUILD      1 rebuilds the images and nvkectl even if they exist
+#   TRIAL_SKIP_DISK_CHECK 1 skips the free-disk check
+#
+# The CNI is Calico: Docker Desktop's kernel has no openvswitch module, so the
+# default OVN-Kubernetes cannot run on its nodes.
+
+set -Eeuo pipefail
+
+TRIAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${TRIAL_DIR}/.." && pwd)"
+STATE_DIR="${TRIAL_DIR}/.state"
+
+export KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-nvke-trial}"
+API_PORT="${TRIAL_API_PORT:-18080}"
+WAIT_MINUTES="${TRIAL_WAIT_MINUTES:-30}"
+REBUILD="${TRIAL_REBUILD:-0}"
+
+CONTROLLER_IMAGE="nvke-controller:trial"
+NODE_IMAGE="cwe-capd-kindest-node:local"
+NVKECTL="${REPO_ROOT}/cli/bin/nvkectl"
+CLUSTERCTL="${REPO_ROOT}/controller/.local/bin/clusterctl"
+TENANT_SPEC="${TRIAL_DIR}/tenant.yaml"
+TENANT_KUBECONFIG="${STATE_DIR}/tenant.kubeconfig"
+PORT_FORWARD_PID="${STATE_DIR}/port-forward.pid"
+PORT_FORWARD_LOG="${STATE_DIR}/port-forward.log"
+CAPI_CLUSTER_FILE="${STATE_DIR}/capi-cluster-name"
+SITE_NAME="trial"
+
+export KUBECONFIG="${STATE_DIR}/mgmt.kubeconfig"
+# nvkectl keeps its site list under XDG_CONFIG_HOME; keep the trial's out of
+# the user's own ~/.config/nvkectl.
+NVKECTL_CONFIG_HOME="${STATE_DIR}/config"
+
+log() { printf '\n[nvke-trial] %s\n' "$*" >&2; }
+die() { printf '[nvke-trial] error: %s\n' "$*" >&2; exit 1; }
+
+nvkectl() { XDG_CONFIG_HOME="${NVKECTL_CONFIG_HOME}" "${NVKECTL}" --site "${SITE_NAME}" "$@"; }
+gmk() { "${MAKE_CMD}" -C "${REPO_ROOT}/$1" "${@:2}"; }
+
+tenant_name() {
+  sed -n 's/^name:[[:space:]]*//p' "${TENANT_SPEC}" | head -n1 | tr -d '"'"'"
+}
+
+# ---------------------------------------------------------------- preflight
+
+# The images, the management cluster and the tenant nodes share the Docker
+# daemon's disk, and a kubelet evicts every pod once less than 10% of it is
+# free. Ask for that margin plus room for the builds.
+check_disk() {
+  [[ "${TRIAL_SKIP_DISK_CHECK:-0}" == 1 ]] && return
+  local size_kb free_kb need_kb
+  read -r size_kb free_kb < <(docker run --rm busybox:1.37 df -kP / | awk 'NR == 2 {print $2, $4}')
+  [[ -n "${size_kb}" && -n "${free_kb}" ]] || die "could not read the Docker disk's free space"
+  need_kb=$((size_kb / 10 + 15 * 1024 * 1024))
+  if ((free_kb < need_kb)); then
+    die "the Docker disk has $((free_kb / 1024 / 1024)) GiB free of $((size_kb / 1024 / 1024)) GiB; the trial needs $((need_kb / 1024 / 1024)) GiB. Free space (docker builder prune) or raise the disk limit (Docker Desktop: Settings > Resources). TRIAL_SKIP_DISK_CHECK=1 skips this check"
+  fi
+}
+
+preflight() {
+  local cmd
+  for cmd in docker kind kubectl helm go jq python3 curl; do
+    command -v "${cmd}" >/dev/null 2>&1 || die "${cmd} is required"
+  done
+  # The Makefiles need GNU Make 4; macOS ships 3.81 as make.
+  if command -v gmake >/dev/null 2>&1; then
+    MAKE_CMD=gmake
+  elif make --version 2>/dev/null | head -n1 | grep -Eq 'GNU Make [4-9]'; then
+    MAKE_CMD="make"
+  else
+    die "GNU Make 4 or later is required (on macOS: brew install make, which installs gmake)"
+  fi
+
+  docker info >/dev/null 2>&1 || die "Docker is not reachable; start Docker Desktop or your Docker daemon"
+
+  # On macOS the Makefiles send Docker commands to COLIMA_DOCKER_HOST. Point it
+  # at whatever daemon the current Docker context uses.
+  if [[ -z "${COLIMA_DOCKER_HOST:-}" ]]; then
+    COLIMA_DOCKER_HOST="$(docker context inspect -f '{{.Endpoints.docker.Host}}')"
+  fi
+  export COLIMA_DOCKER_HOST
+  export DOCKER_HOST="${DOCKER_HOST:-${COLIMA_DOCKER_HOST}}"
+
+  local arch
+  arch="$(docker version --format '{{.Server.Arch}}')"
+  case "${arch}" in
+    arm64 | aarch64) DOCKER_ARCH=arm64 ;;
+    *) die "the trial's node release set is arm64 only; this Docker daemon is ${arch}" ;;
+  esac
+
+  check_disk
+
+  [[ -f "${TENANT_SPEC}" ]] || die "missing ${TENANT_SPEC}"
+  mkdir -p "${STATE_DIR}" "${NVKECTL_CONFIG_HOME}"
+}
+
+# ------------------------------------------------------------ management plane
+
+management_cluster() {
+  log "management cluster: kind ${KIND_CLUSTER_NAME}"
+  gmk controller kind-up
+  kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
+  chmod 0600 "${KUBECONFIG}"
+}
+
+cluster_api() {
+  if kubectl get deployment -n capd-system capd-controller-manager >/dev/null 2>&1; then
+    log "Cluster API and CAPD: already installed"
+    return
+  fi
+  local version
+  version="$(gmk controller -s --no-print-directory print-CAPI_CORE_VERSION)"
+  log "Cluster API and CAPD: installing ${version}"
+  gmk controller clusterctl-install
+  CLUSTER_TOPOLOGY=true "${CLUSTERCTL}" init \
+    --core "cluster-api:${version}" \
+    --bootstrap "kubeadm:${version}" \
+    --control-plane "kubeadm:${version}" \
+    --infrastructure "docker:${version}" \
+    --wait-providers
+}
+
+image_exists() { docker image inspect "$1" >/dev/null 2>&1; }
+
+# The node image bakes in a Calico manifests package. Building it needs
+# dpkg-deb and sha256sum, which macOS lacks, so build it in a Debian container
+# when they are missing. capd-image then finds the package and keeps it.
+calico_package() {
+  local deb="${REPO_ROOT}/controller/.local/cni/nvke-cni-calico-manifests-3.30.1_3.30.1_all.deb"
+  if [[ -f "${deb}" && "${REBUILD}" != 1 ]]; then
+    return
+  fi
+  if command -v dpkg-deb >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+    return
+  fi
+  log "building the Calico manifests package in a Debian container (no dpkg-deb on this host)"
+  mkdir -p "${REPO_ROOT}/controller/.local/cni"
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -v "${REPO_ROOT}/controller:/src" -w /src \
+    buildpack-deps:bookworm-curl \
+    bash hack/ci/prepare-calico-assets.sh /src/.local/cni
+  [[ -f "${deb}" ]] || die "the Calico manifests package was not built: ${deb}"
+}
+
+build() {
+  calico_package
+  if [[ "${REBUILD}" == 1 ]] || ! image_exists "${NODE_IMAGE}"; then
+    log "building the tenant node image ${NODE_IMAGE} (nvke-agent and Calico)"
+    CNI_PLUGIN=calico INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \
+      gmk controller capd-image
+  else
+    log "tenant node image ${NODE_IMAGE}: already built"
+  fi
+
+  if [[ "${REBUILD}" == 1 ]] || ! image_exists "${CONTROLLER_IMAGE}"; then
+    log "building the controller image ${CONTROLLER_IMAGE}"
+    gmk controller docker-build-local LOCAL_PLATFORM="linux/${DOCKER_ARCH}" IMG="${CONTROLLER_IMAGE}"
+  else
+    log "controller image ${CONTROLLER_IMAGE}: already built"
+  fi
+  log "loading ${CONTROLLER_IMAGE} into kind"
+  kind load docker-image "${CONTROLLER_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+
+  if [[ "${REBUILD}" == 1 ]] || [[ ! -x "${NVKECTL}" ]]; then
+    log "building nvkectl"
+    gmk cli build
+  fi
+}
+
+deploy_stack() {
+  local vip
+  vip="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' \
+    "${KIND_CLUSTER_NAME}-control-plane")"
+  [[ -n "${vip}" ]] || die "could not read the kind control-plane address"
+  log "deploying the site stack from controller/deploy/capi-trial (management address ${vip})"
+  MANAGEMENT_VIP="${vip}" \
+  STACK_DIR="${REPO_ROOT}" \
+  DEPLOY_TARGET=capi-trial \
+  NODE_AGENT_SPIRE_ATTESTATION_METHOD=joinToken \
+  NVKE_CONTROLLER_RELEASES_DIR="${TRIAL_DIR}/releases" \
+    bash "${REPO_ROOT}/controller/hack/ci/deploy-stack.sh" "${CONTROLLER_IMAGE}"
+
+  # Tenant kubeconfigs authenticate with the SPIRE exec plugin, so every
+  # controller that reads them has to carry it.
+  log "patching the Cluster API and CAPD controllers with the SPIRE exec-auth plugin"
+  gmk controller capi-spiffe-exec-auth
+  kubectl -n nvke-controller rollout status deployment/nvke-controller --timeout=10m
+}
+
+# ------------------------------------------------------------------- NVKE API
+
+api_up() { curl -fsS -o /dev/null "http://127.0.0.1:${API_PORT}/api/version" 2>/dev/null; }
+
+port_forward() {
+  if api_up; then
+    return
+  fi
+  stop_port_forward
+  log "forwarding the NVKE API to http://127.0.0.1:${API_PORT}"
+  nohup kubectl -n nvke-controller port-forward svc/nvke-controller "${API_PORT}:8080" \
+    >"${PORT_FORWARD_LOG}" 2>&1 &
+  echo $! >"${PORT_FORWARD_PID}"
+  local _
+  for _ in $(seq 1 30); do
+    api_up && return
+    sleep 1
+  done
+  die "the NVKE API did not answer on port ${API_PORT}; see ${PORT_FORWARD_LOG}"
+}
+
+stop_port_forward() {
+  if [[ -f "${PORT_FORWARD_PID}" ]]; then
+    kill "$(cat "${PORT_FORWARD_PID}")" 2>/dev/null || true
+    rm -f "${PORT_FORWARD_PID}"
+  fi
+}
+
+register_site() {
+  nvkectl config set-site --name "${SITE_NAME}" --url "http://127.0.0.1:${API_PORT}" \
+    --kubeconfig "${KUBECONFIG}" >/dev/null
+}
+
+# --------------------------------------------------------------------- tenant
+
+tenant_json() { nvkectl get clusters "$(tenant_name)" -o json 2>/dev/null; }
+
+tenant_condition() {
+  tenant_json | jq -r --arg c "$1" \
+    '(if type == "array" then .[0] else . end) | .conditions[$c].status // "Unknown"' 2>/dev/null \
+    || echo Unknown
+}
+
+create_tenant() {
+  local name
+  name="$(tenant_name)"
+  if tenant_json >/dev/null; then
+    log "tenant ${name}: already exists"
+  else
+    log "creating tenant ${name} from ${TENANT_SPEC}"
+    nvkectl create cluster -f "${TENANT_SPEC}"
+  fi
+
+  log "waiting up to ${WAIT_MINUTES} minutes for ${name} to be provisioned"
+  local deadline=$(($(date +%s) + WAIT_MINUTES * 60)) last=""
+  while :; do
+    local state
+    state="$(tenant_condition provisioned)"
+    [[ "${state}" == True ]] && break
+    if [[ "$(date +%s)" -ge "${deadline}" ]]; then
+      tenant_json | jq '(if type == "array" then .[0] else . end) | .conditions' >&2 || true
+      die "${name} was not provisioned in ${WAIT_MINUTES} minutes; run '$0 status'"
+    fi
+    local machines
+    machines="$(kubectl get machines.cluster.x-k8s.io -A --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "${state}/${machines}" != "${last}" ]]; then
+      log "provisioned=${state}, CAPI machines=${machines}"
+      last="${state}/${machines}"
+    fi
+    sleep 15
+  done
+  log "tenant ${name} is provisioned"
+}
+
+# The CAPI Cluster the controller created for the tenant: the only one, or
+# the one whose name carries the tenant's.
+capi_cluster_name() {
+  local name all
+  name="$(tenant_name)"
+  all="$(kubectl get clusters.cluster.x-k8s.io -A -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+  if [[ "$(printf '%s\n' "${all}" | grep -c .)" -eq 1 ]]; then
+    printf '%s\n' "${all}"
+  else
+    printf '%s\n' "${all}" | grep -F "${name}" | head -n1
+  fi
+}
+
+tenant_reachable() {
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" --request-timeout=10s get nodes >/dev/null 2>&1
+}
+
+tenant_kubeconfig() {
+  local name capi
+  name="$(tenant_name)"
+  capi="$(capi_cluster_name)"
+  [[ -n "${capi}" ]] && printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
+
+  nvkectl get kubeconfig "${name}" --output-file "${TENANT_KUBECONFIG}"
+  chmod 0600 "${TENANT_KUBECONFIG}"
+  if ! tenant_reachable; then
+    # Docker Desktop does not route container addresses to the host, so point
+    # the kubeconfig at the load balancer's published 127.0.0.1 port instead.
+    [[ -n "${capi}" ]] || die "could not find the tenant's CAPI Cluster to rewrite its kubeconfig"
+    log "the kubeconfig's server is not reachable from this host; using the published load balancer port"
+    (cd "${REPO_ROOT}/controller" && ./hack/fetch-capd-kubeconfig.sh "${capi}" "${TENANT_KUBECONFIG}")
+    chmod 0600 "${TENANT_KUBECONFIG}"
+    tenant_reachable || die "the tenant API is not reachable with ${TENANT_KUBECONFIG}"
+  fi
+
+  log "waiting for the tenant's nodes to be Ready"
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" wait --for=condition=Ready nodes --all --timeout=10m
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide
+}
+
+# ------------------------------------------------------------------- commands
+
+cmd_up() {
+  preflight
+  management_cluster
+  cluster_api
+  build
+  deploy_stack
+  port_forward
+  register_site
+  create_tenant
+  tenant_kubeconfig
+  cat >&2 <<EOF
+
+[nvke-trial] done. The tenant is running:
+
+  export KUBECONFIG=${TENANT_KUBECONFIG}
+  kubectl get nodes
+
+  The NVKE API is at http://127.0.0.1:${API_PORT} while the port-forward runs.
+  Run nvkectl against it with:
+  XDG_CONFIG_HOME=${NVKECTL_CONFIG_HOME} ${NVKECTL} get clusters
+
+  Remove everything with: $0 down
+EOF
+}
+
+cmd_status() {
+  preflight
+  if ! kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null; then
+    log "no management cluster ${KIND_CLUSTER_NAME}"
+    return
+  fi
+  log "management plane pods that are not Running or Completed"
+  kubectl get pods -A --no-headers | awk '$4 != "Running" && $4 != "Completed"' || true
+  log "Cluster API"
+  kubectl get clusters.cluster.x-k8s.io,machines.cluster.x-k8s.io -A 2>/dev/null || true
+  if [[ -x "${NVKECTL}" ]]; then
+    port_forward
+    register_site
+    log "NVKE tenants"
+    nvkectl get clusters || true
+  fi
+  log "tenant containers"
+  docker ps --filter "label=io.x-k8s.kind.role" --format '{{.Names}}\t{{.Status}}' \
+    | grep -v "^${KIND_CLUSTER_NAME}-" || true
+}
+
+cmd_kubeconfig() {
+  preflight
+  port_forward
+  register_site
+  tenant_kubeconfig
+}
+
+cmd_down() {
+  preflight
+  if kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null; then
+    kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
+    local capi
+    capi="$(capi_cluster_name || true)"
+    [[ -n "${capi}" ]] && printf '%s\n' "${capi}" >"${CAPI_CLUSTER_FILE}"
+    if [[ -x "${NVKECTL}" ]] && kubectl get deployment -n nvke-controller nvke-controller >/dev/null 2>&1; then
+      port_forward
+      register_site
+      if tenant_json >/dev/null; then
+        log "deleting tenant $(tenant_name)"
+        nvkectl delete cluster "$(tenant_name)" || true
+        local _
+        for _ in $(seq 1 60); do
+          [[ -z "$(kubectl get clusters.cluster.x-k8s.io -A --no-headers 2>/dev/null)" ]] && break
+          sleep 10
+        done
+      fi
+    fi
+    stop_port_forward
+    log "deleting the management cluster ${KIND_CLUSTER_NAME}"
+    kind delete cluster --name "${KIND_CLUSTER_NAME}"
+  fi
+  stop_port_forward
+
+  # CAPD labels each tenant container with its CAPI cluster name. Remove any
+  # the tenant delete left behind.
+  if [[ -f "${CAPI_CLUSTER_FILE}" ]]; then
+    local capi leftovers
+    capi="$(cat "${CAPI_CLUSTER_FILE}")"
+    leftovers="$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${capi}")"
+    if [[ -n "${leftovers}" ]]; then
+      log "removing leftover tenant containers of ${capi}"
+      # shellcheck disable=SC2086
+      docker rm -f ${leftovers} >/dev/null
+    fi
+  fi
+  rm -rf "${STATE_DIR}"
+  log "removed. The built images stay in Docker: ${CONTROLLER_IMAGE}, ${NODE_IMAGE}"
+}
+
+case "${1:-up}" in
+  up) cmd_up ;;
+  status) cmd_status ;;
+  kubeconfig) cmd_kubeconfig ;;
+  down) cmd_down ;;
+  -h | --help | help) sed -n '5,27p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1'; use up, status, kubeconfig or down" ;;
+esac
