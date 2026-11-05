@@ -9,6 +9,13 @@ name: Image Validate NVCR
 # next to nvcr.io/<dsx-org-team>/nvke-controller:<version>. A site running a
 # controller version can then run the tests that shipped with it.
 #
+# Off unless the repository variable NVKE_VALIDATE_IMAGE_PUBLISH is `true`:
+# with it unset, the job is skipped on every trigger, dispatch included, and a
+# site builds the image itself from the release tag ("Building the image
+# yourself" in controller/test/e2e/README.md). A repository variable, not one
+# in the `nvcr` environment, because a job's `if` is decided before its
+# environment's variables are read.
+#
 # Triggers, versioning and tags follow image-nvcr.yml; see its header for why.
 # The differences:
 #
@@ -45,7 +52,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository_id == '1323115536'
+    if: github.repository_id == '1323115536' && vars.NVKE_VALIDATE_IMAGE_PUBLISH == 'true'
     name: Build and push
     runs-on: linux-amd64-cpu16
     environment: nvcr

@@ -428,10 +428,13 @@ checks 11–23, 30 and 31 in [What it checks](#what-it-checks). One differs:
 `NVKE_TENANT_PVC_STORAGE_CLASS` picks the StorageClass check 30 claims from,
 and nothing else; check 23 reads `NVKE_TENANT_STORAGE_CLASSES`.
 
-Each controller release publishes the image built from the same commit, as
-`nvke-validate:v<version>` beside `nvke-controller` (see
-`.github/workflows/image-validate-nvcr.yml`), so the tests a site runs are the
-tests that shipped with its controller.
+A site builds the image from its controller's release tag, as [Building the
+image yourself](#building-the-image-yourself) describes, so the tests it runs
+are the tests that shipped with its controller. The release does not publish
+it: `.github/workflows/image-validate-nvcr.yml` can, as
+`nvke-validate:v<version>` beside `nvke-controller`, but only with the
+repository variable `NVKE_VALIDATE_IMAGE_PUBLISH` set to `true`, and it is
+unset.
 
 The entrypoint sets `-ginkgo.timeout=3h`. A healthy site finishes far sooner,
 but on a broken one each check waits out its own limit, and a suite timeout
@@ -466,11 +469,10 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 ### Building the image yourself
 
-The build is reproducible: the same commit built with the same arguments gives
-the published image's digest, so a site can build it in its own pipeline and
-still check it against the release. CI proves this on every change by
-building it twice, the second time with no cache and every file's mtime
-changed.
+This is how a site gets the image. The build is reproducible: the same commit
+built with the same arguments gives the same digest wherever it is built. CI
+proves this on every change by building it twice, the second time with no
+cache and every file's mtime changed.
 
 Build from the release tag of the controller the site runs,
 `controller/v<version>`, the same version the site pins. Never build from
@@ -484,8 +486,9 @@ cat controller/test/e2e/bin/validate-image-digest.txt
 ```
 
 `validate-image-push VALIDATE_REPO=<repository> VALIDATE_PUSH_TAGS=v0.2.0`
-pushes it instead. Either target derives the rest from the checkout. Compare
-the digest with the published one; when they match, the release's build
+pushes it instead. Either target derives the rest from the checkout. Where
+the image was also published (`NVKE_VALIDATE_IMAGE_PUBLISH` on), compare the
+digest with the published one; when they match, the release's build
 provenance covers this build too:
 
 ```bash
@@ -523,11 +526,12 @@ Any other change, such as the platforms or attestations added with
 
 ### Extending the image
 
-To add tools, certificates or wrapper scripts, start from the published image
-rather than editing this Dockerfile, so the suite stays the one that shipped:
+To add tools, certificates or wrapper scripts, start from the image built from
+the release tag rather than editing this Dockerfile, so the suite stays the one
+that shipped:
 
 ```dockerfile
-FROM nvcr.io/<dsx-org-team>/nvke-validate:v0.2.0
+FROM <repository>/nvke-validate:v0.2.0
 USER 0
 RUN apk add --no-cache curl
 USER 65532:65532
