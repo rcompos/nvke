@@ -11,7 +11,7 @@
 #   - nvkectl config set-site --url http://localhost:8080
 
 name: trial-1
-controlPlaneKubernetesVersion: 1.34.2
+controlPlaneKubernetesVersion: 1.34.8
 cniPlugin: calico
 etcdEncrypted: false
 
