@@ -23,6 +23,8 @@ navigation:
 
       - section: Get started
         contents:
+          - page: "Trial: NVKE on Cluster API with Docker"
+            path: get-started/trial.md
           - page: "Quickstart: evaluate locally with mock-NICo"
             path: get-started/quickstart-local.md
           - page: Run NVKE end to end on one machine

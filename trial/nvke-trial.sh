@@ -228,9 +228,10 @@ deploy_stack() {
     bash "${REPO_ROOT}/controller/hack/ci/deploy-stack.sh" "${CONTROLLER_IMAGE}"
 
   # Tenant kubeconfigs authenticate with the SPIRE exec plugin, so every
-  # controller that reads them has to carry it.
-  log "patching the Cluster API and CAPD controllers with the SPIRE exec-auth plugin"
-  gmk controller capi-spiffe-exec-auth
+  # controller that reads them has to carry it: --providers patches every
+  # provider clusterctl installed, as a site on any other provider needs.
+  log "patching the Cluster API provider controllers with the SPIRE exec-auth plugin"
+  bash "${REPO_ROOT}/controller/hack/apply-capi-spiffe-exec-auth.sh" --kubeconfig "${KUBECONFIG}" --providers
   kubectl -n nvke-controller rollout status deployment/nvke-controller --timeout=10m
 }
 

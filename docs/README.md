@@ -14,6 +14,7 @@ the site-bootstrap and tenant-cluster pages below, which it will replace.
 | [overview/what-is-nvke.md](overview/what-is-nvke.md) | What NVKE is, its parts, and who does what from Day 0 to Day 2 |
 | [overview/supported-platforms.md](overview/supported-platforms.md) | The Kubernetes versions, networking, infrastructure providers, node OS and tools this release supports |
 | [overview/preview-status.md](overview/preview-status.md) | What the preview supports and its known limitations |
+| [get-started/trial.md](get-started/trial.md) | Try NVKE with one command on Docker or GitHub-hosted runners: a site and a tenant cluster on Cluster API with CAPD, validated |
 | [get-started/quickstart-local.md](get-started/quickstart-local.md) | Evaluate NVKE on one Linux host with mock-NICo |
 | [get-started/local-site.md](get-started/local-site.md) | The operator flow end to end on one machine: bootstrap a container node, install the management plane, create a workload cluster on simulated NICo |
 | [operate/plan-installation.md](operate/plan-installation.md) | What to decide and gather before installing |
