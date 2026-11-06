@@ -221,9 +221,17 @@ jobs:
       # sudo in the ARC runner does not grant CAP_SYS_MODULE, and DinD has its
       # own /lib/modules filesystem (#1515).
       - name: Install the Open vSwitch module files
+        env:
+          RUNNER_LABEL: ${{ inputs.runner }}
         run: |
           uname -a
           sudo apt-get install -y -qq kmod
+          # REVERT-WHEN-capd-e2e-runs-on-a-pull-request-mirror: hosted kernels may have no
+          # linux-modules-extra package; use the host's own module when it has one.
+          if [[ "${RUNNER_LABEL}" == ubuntu-* ]] && modinfo openvswitch; then
+            echo "using the host's /lib/modules openvswitch"
+            exit 0
+          fi
           modules="${RUNNER_TEMP}/nvke-host-kernel-modules"
           sudo bash controller/hack/ci/prepare-host-kernel-modules.sh "${modules}"
           echo "NKE_E2E_HOST_MODULES_DIR=${modules}/lib/modules" >> "${GITHUB_ENV}"
