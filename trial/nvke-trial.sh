@@ -8,14 +8,16 @@
 # Every NVKE image and binary is built here; nothing is pulled from an NVKE
 # registry.
 #
-# usage: trial/nvke-trial.sh [up|validate|status|kubeconfig|down]
+# usage: trial/nvke-trial.sh [up|validate|status|kubeconfig|nvkectl ARGS|down]
 #
 #   up          build, deploy, create the tenant, write its kubeconfig, then
 #               validate the site
 #   validate    run the nvke-validate site and tenant checks; results in
 #               .state/validate
-#   status      show the management plane, the tenant and its containers
+#   status      show the management plane, the tenant and its containers;
+#               restarts the NVKE API port-forward if it stopped
 #   kubeconfig  write the tenant kubeconfig again
+#   nvkectl     run nvkectl against the trial's site, e.g. nvkectl get clusters
 #   down        delete the tenant, then the management cluster
 #
 # Every step of `up` skips what already exists, so a failed run can be re-run.
@@ -471,9 +473,9 @@ cmd_up() {
   export KUBECONFIG=${TENANT_KUBECONFIG}
   kubectl get nodes
 
-  The NVKE API is at http://127.0.0.1:${API_PORT} while the port-forward runs.
-  Run nvkectl against it with:
-  XDG_CONFIG_HOME=${NVKECTL_CONFIG_HOME} ${NVKECTL} get clusters
+  The NVKE API is at http://127.0.0.1:${API_PORT} while the port-forward runs;
+  $0 status restarts it. Run nvkectl against it with:
+  $0 nvkectl get clusters
 
   Remove everything with: $0 down
 EOF
@@ -485,6 +487,10 @@ cmd_status() {
     log "no management cluster ${KIND_CLUSTER_NAME}"
     return
   fi
+  if ! management_running; then
+    log "the management cluster ${KIND_CLUSTER_NAME} exists but is not running; run $0 down, then up"
+    return
+  fi
   log "management plane pods that are not Running or Completed"
   kubectl get pods -A --no-headers | awk '$4 != "Running" && $4 != "Completed"' || true
   log "Cluster API"
@@ -492,12 +498,58 @@ cmd_status() {
   if [[ -x "${NVKECTL}" ]]; then
     port_forward
     register_site
-    log "NVKE tenants"
+    log "NVKE API at http://127.0.0.1:${API_PORT}; tenants"
     nvkectl get clusters || true
   fi
-  log "tenant containers"
-  docker ps --filter "label=io.x-k8s.kind.role" --format '{{.Names}}\t{{.Status}}' \
-    | grep -v "^${KIND_CLUSTER_NAME}-" || true
+  local capi
+  capi="$(capi_cluster_name 2>/dev/null || true)"
+  if [[ -n "${capi}" ]]; then
+    log "tenant containers"
+    docker ps -a --filter "label=io.x-k8s.kind.cluster=${capi}" --format '{{.Names}}\t{{.Status}}'
+    tenant_health "${capi}"
+  fi
+}
+
+# Says what is wrong with the tenant when its API does not answer. CAPD
+# tenants do not survive a Docker restart: the node containers come back on
+# new addresses, while the API server, its certificate and etcd keep the old.
+tenant_health() {
+  local capi="$1" node advertised current stopped
+  if [[ -f "${TENANT_KUBECONFIG}" ]] && tenant_reachable; then
+    log "tenant API: reachable with ${TENANT_KUBECONFIG}"
+    return 0
+  fi
+  stopped="$(docker ps -a --filter "label=io.x-k8s.kind.cluster=${capi}" --filter status=exited --format '{{.Names}}')"
+  if [[ -n "${stopped}" ]]; then
+    log "tenant containers stopped: $(printf '%s' "${stopped}" | tr '\n' ' ')"
+  fi
+  node="$(docker ps --filter "label=io.x-k8s.kind.cluster=${capi}" \
+    --filter label=io.x-k8s.kind.role=control-plane --format '{{.Names}}' | head -n1)"
+  if [[ -n "${node}" ]]; then
+    current="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "${node}")"
+    advertised="$(docker exec "${node}" sed -n 's/^ *- --advertise-address=//p' \
+      /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null || true)"
+    if [[ -n "${advertised}" && "${advertised}" != "${current}" ]]; then
+      log "tenant API: broken. ${node} now has address ${current}, but its API server was set up on ${advertised}, as after a Docker restart. A CAPD tenant does not recover from that; run $0 down, then up"
+      return 0
+    fi
+  fi
+  if [[ -f "${TENANT_KUBECONFIG}" ]]; then
+    log "tenant API: not reachable with ${TENANT_KUBECONFIG}; $0 kubeconfig writes it again"
+  else
+    log "tenant API: no kubeconfig yet; $0 kubeconfig writes it"
+  fi
+}
+
+cmd_nvkectl() {
+  [[ -x "${NVKECTL}" ]] || die "nvkectl is not built; run $0 up"
+  if ! kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null || ! management_running; then
+    die "the management cluster ${KIND_CLUSTER_NAME} is not running; run $0 up"
+  fi
+  mkdir -p "${NVKECTL_CONFIG_HOME}"
+  port_forward
+  register_site
+  nvkectl "$@"
 }
 
 cmd_validate() {
@@ -590,6 +642,7 @@ case "${1:-up}" in
   status) cmd_status ;;
   kubeconfig) cmd_kubeconfig ;;
   down) cmd_down ;;
-  -h | --help | help) sed -n '5,31p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$1'; use up, validate, status, kubeconfig or down" ;;
+  nvkectl) cmd_nvkectl "${@:2}" ;;
+  -h | --help | help) sed -n '5,34p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1'; use up, validate, status, kubeconfig, nvkectl or down" ;;
 esac

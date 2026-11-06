@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Example CreateClusterRequest for a local CAPD (Docker-backed CAPI) cluster.
-# Field names match the controller API exactly — see /api/docs on your management plane.
+# The trial's tenant: a CreateClusterRequest for a CAPD (Docker-backed Cluster
+# API) cluster with Calico, one control-plane node and one worker. Field names
+# match the controller API; see /api/docs on the NVKE API.
 #
-# Usage: nvkectl create cluster -f examples/capd-cluster.yaml
+# trial/nvke-trial.sh up creates it. By hand, with the trial's site up:
+#   trial/nvke-trial.sh nvkectl create cluster -f trial/tenant.yaml
 #
-# Prerequisites:
-#   - tilt up running with CAPD enabled
-#   - nvkectl config set-site --url http://localhost:8080
+# controlPlaneKubernetesVersion must match the kindest/node tag the node image
+# is built on (KINDEST_NODE_TAG in controller/hack/capd-kindest-node/Dockerfile),
+# as must the releases' machine-init-kubernetes-version.
 
 name: trial-1
 controlPlaneKubernetesVersion: 1.34.8
