@@ -139,7 +139,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           start=$(date +%s)
-          deadline=$((start + 30 * 60))
+          deadline=$((start + 15 * 60))
           last=""
           while :; do
             phases="$(kubectl get machines -n default \
@@ -152,7 +152,7 @@ jobs:
             running="$(grep -c '=Running$' <<<"${phases}" || true)"
             (( running >= 2 )) && break
             if (( $(date +%s) > deadline )); then
-              echo "::error::both machines were not Running in 30 minutes"
+              echo "::error::both machines were not Running in 15 minutes"
               exit 1
             fi
             sleep 15
@@ -179,4 +179,10 @@ jobs:
           for vmi in $(kubectl get vmi -n default -o name); do
             echo "== ${vmi}"
             kubectl -n default get "${vmi}" -o jsonpath='{.status.phase} {.status.interfaces}{"\n"}'
+          done
+          kubectl get svc,endpointslices -n default -o wide
+          # The VM's serial console: cloud-init and kubeadm's output.
+          for pod in $(kubectl get pods -n default -l kubevirt.io=virt-launcher -o name); do
+            echo "== ${pod} guest console"
+            kubectl -n default logs "${pod}" -c guest-console-log --tail=400
           done
