@@ -93,6 +93,12 @@ jobs:
           base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
           kubectl apply -f "${base}/kubevirt-operator.yaml"
           kubectl apply -f "${base}/kubevirt-cr.yaml"
+          # KubeVirt's default pod-network binding is bridge, which hands the
+          # pod's address to the guest; on kind nothing then reaches the VM
+          # (a pod's connection to its port 22 timed out). Masquerade keeps the
+          # address on the launcher pod and forwards to the guest.
+          kubectl -n kubevirt patch kv kubevirt --type merge \
+            -p '{"spec":{"configuration":{"network":{"defaultNetworkInterface":"masquerade"}}}}'
           start=$(date +%s)
           kubectl -n kubevirt wait kv kubevirt --for condition=Available --timeout=15m
           echo "KubeVirt Available after $(( $(date +%s) - start )) s"
@@ -186,11 +192,14 @@ jobs:
             kubectl -n default get "${vmi}" -o jsonpath='{.status.phase} {.status.interfaces}{"\n"}'
           done
           kubectl get svc,endpointslices -n default -o wide
-          # Can a pod reach each VM's SSH port, as CAPK's check needs?
-          for ip in $(kubectl get vmi -n default -o jsonpath='{.items[*].status.interfaces[0].ipAddress}'); do
-            kubectl run "ssh-probe-${RANDOM}" --rm -i --restart=Never --image=busybox:1.37 -- \
-              sh -c "nc -zv -w 5 ${ip} 22 && echo ssh port open on ${ip}"
-          done
+          # Can a pod reach each VM's SSH and API ports, and the API Service?
+          targets="$(kubectl get vmi -n default -o jsonpath='{range .items[*]}{.status.interfaces[0].ipAddress}:22 {.status.interfaces[0].ipAddress}:6443 {end}')"
+          targets+=" ${CLUSTER_NAME}-lb.default.svc:6443"
+          kubectl run "port-probe-${RANDOM}" --rm -i --restart=Never --image=busybox:1.37 -- \
+            sh -c "for t in ${targets}; do nc -zv -w 5 \${t%:*} \${t##*:} 2>&1; done"
+          kubectl get kv -n kubevirt kubevirt -o jsonpath='{.spec.configuration.network}{"\n"}'
+          kubectl get kubeadmcontrolplane -n default -o yaml | grep -A3 -E "type: (Initialized|Available|ControlPlaneComponentsHealthy)" | head -30
+          kubectl -n capi-kubeadm-control-plane-system logs deploy/capi-kubeadm-control-plane-controller-manager --tail=40
           # The VM's serial console: cloud-init and kubeadm's output.
           for pod in $(kubectl get pods -n default -l kubevirt.io=virt-launcher -o name); do
             echo "== ${pod} guest console"
