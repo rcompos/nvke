@@ -450,12 +450,17 @@ nvkectl_smoke_nodepool_negatives() {
 }
 
 # `get providers` reads the site kubeconfig through kubectl rather than the controller
-# REST client, so it is the only smoke assertion covering that subsystem. Both
-# lanes stage CAPNICo and wait for its CRDs (ci/backend-e2e.sh, needs-capnico-source),
-# so crdsEstablished holds on CAPD too; only the NICo lane deploys the manager
-# and the credentials Secret.
+# REST client, so it is the only smoke assertion covering that subsystem. The
+# CAPNICo CRDs are on the NICo lane and on a CAPD lane Tilt deploys, where
+# ci/backend-e2e.sh applies them. A CAPD lane on the deploy path has none: its
+# controller lists only infra, so the chart leaves the NICo controllers off.
+# Only the NICo lane deploys the manager and the credentials Secret.
 nvkectl_smoke_providers() {
-  local out types
+  local out types want_crds=true crds
+
+  if [[ "${NKE_E2E_BACKEND:-}" != "nico" && "${NKE_E2E_USE_STACK:-false}" == "true" ]]; then
+    want_crds=false
+  fi
 
   if ! out="$(nvkectl_exec get providers -o json 2>&1)"; then
     log "nvkectl smoke: 'get providers -o json' failed" >&2
@@ -472,8 +477,9 @@ nvkectl_smoke_providers() {
   # provider ships, or if the kubeconfig plumbing breaks. Deliberately NOT a
   # check for state == CONFIGURED -- managerDeployments selects on
   # app.kubernetes.io/name, a label owned by the provider repository.
-  if [[ "$(jq -r '.[] | select(.type=="nico") | .crdsEstablished' <<<"${out}")" != "true" ]]; then
-    log "nvkectl smoke: nico provider reports crdsEstablished=false" >&2
+  crds="$(jq -r '.[] | select(.type=="nico") | .crdsEstablished' <<<"${out}")"
+  if [[ "${crds}" != "${want_crds}" ]]; then
+    log "nvkectl smoke: nico provider reports crdsEstablished=${crds}, want ${want_crds}" >&2
     return 1
   fi
 
