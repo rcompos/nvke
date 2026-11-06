@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# REVERT-WHEN-capd-e2e-runs-on-a-pull-request-mirror: scratch branch only.
+# Runs capd-e2e.yml's pull-request suite on GitHub-hosted runners, deploying
+# from controller/deploy/capd-e2e, so a fork can try chart and deploy-path
+# changes before a pull request exists. Inputs follow capd-e2e.yml's mirror
+# branch values, except the runners and the timeout.
+
+name: Scratch CAPD E2E (hosted)
+
+on:
+  push:
+    branches:
+      - scratch/capd-e2e-hosted
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: scratch-capd-e2e-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capd-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    uses: ./.github/workflows/backend-e2e.yml
+    permissions:
+      contents: read
+    with:
+      backend: capd
+      arch: ${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
+      label-filter: '(core-docker || health) && !tpm-attestation && !gpu'
+      providers: '["capi_core", "bgp-containers", "capd", "capd-reboot-controller"]'
+      timeout-minutes: 60
+      require-authn: false
+      nvkectl-smoke: true
+      needs-capnico-source: true
+      use-nke-stack: true

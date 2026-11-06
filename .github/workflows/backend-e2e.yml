@@ -116,7 +116,8 @@ jobs:
   e2e:
     name: ${{ inputs.backend }}-e2e (${{ inputs.arch }})
     runs-on: ${{ inputs.runner }}
-    if: github.repository_id == '1323115536'
+    # REVERT-WHEN-capd-e2e-runs-on-a-pull-request-mirror: scratch branch only, lets the fork run the lane.
+    if: github.repository_id == '1323115536' || github.repository_id == '1437765837'
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -152,6 +153,20 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+
+      # REVERT-WHEN-capd-e2e-runs-on-a-pull-request-mirror: hosted runners only.
+      - name: Free disk space
+        if: startsWith(inputs.runner, 'ubuntu-')
+        run: |
+          set -Eeuo pipefail
+          df -h /
+          sudo rm -rf -- \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
