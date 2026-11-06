@@ -12,7 +12,8 @@
 #
 #   up          build, deploy, create the tenant, write its kubeconfig, then
 #               validate the site
-#   validate    run the nvke-validate site checks; results in .state/validate
+#   validate    run the nvke-validate site and tenant checks; results in
+#               .state/validate
 #   status      show the management plane, the tenant and its containers
 #   kubeconfig  write the tenant kubeconfig again
 #   down        delete the tenant, then the management cluster
@@ -24,7 +25,8 @@
 #   TRIAL_WAIT_MINUTES how long to wait for the tenant (default 30)
 #   TRIAL_REBUILD      1 rebuilds the images and nvkectl even if they exist
 #   TRIAL_SKIP_DISK_CHECK 1 skips the free-disk check
-#   TRIAL_SKIP_VALIDATE 1 ends `up` without validating the site
+#   TRIAL_SKIP_VALIDATE 1 ends `up` without validating
+#   TRIAL_SKIP_TENANT_VALIDATE 1 validates the site alone
 #
 # The CNI is Calico: Docker Desktop's kernel has no openvswitch module, so the
 # default OVN-Kubernetes cannot run on its nodes.
@@ -47,6 +49,9 @@ VALIDATE_DIR="${STATE_DIR}/validate"
 # Every namespace the trial installs into that must run a ready pod. The
 # suite's default list is the NICo deploy path's.
 SITE_NAMESPACES="kube-system,cert-manager,capi-system,capi-kubeadm-bootstrap-system,capi-kubeadm-control-plane-system,capd-system,nvke-controller,postgres,spire-server,temporal"
+# The tenant's, with Calico.
+TENANT_NAMESPACES="kube-system,calico-system,calico-apiserver,tigera-operator"
+TENANT_VALIDATE_RBAC="${TRIAL_DIR}/validate-tenant-rbac.yaml"
 NVKECTL="${REPO_ROOT}/cli/bin/nvkectl"
 CLUSTERCTL="${REPO_ROOT}/controller/.local/bin/clusterctl"
 TENANT_SPEC="${TRIAL_DIR}/tenant.yaml"
@@ -70,6 +75,9 @@ gmk() { "${MAKE_CMD}" -C "${REPO_ROOT}/$1" "${@:2}"; }
 tenant_name() {
   sed -n 's/^name:[[:space:]]*//p' "${TENANT_SPEC}" | head -n1 | tr -d '"'"'"
 }
+
+# The Secret nvke-validate reads the tenant credential from.
+tenant_secret() { printf 'nvke-validate-%s\n' "$(tenant_name)"; }
 
 # ---------------------------------------------------------------- preflight
 
@@ -350,11 +358,43 @@ tenant_kubeconfig() {
 
 # ------------------------------------------------------------------- validate
 
-# Runs the validation image's site checks from a container on kind's Docker
-# network, as the management cluster's admin. The expected versions come from
-# what the site was built from, not from the site: the controller's from the
-# image the trial deployed, Kubernetes' from the kind node image.
-validate_site() {
+# The suite reaches the tenant as a ServiceAccount, never as its admin, and
+# reads that credential from a Secret in its own namespace on the site, which
+# outside a pod is default. A CAPD tenant has no control-plane VIP, so the
+# Secret names the server: a control-plane node on kind's network, where the
+# validation container runs. Not CAPD's load balancer, whose address the API
+# server's certificate does not carry.
+tenant_credential() {
+  local capi node server dir
+  capi="$(capi_cluster_name)"
+  [[ -n "${capi}" ]] || die "could not find the tenant's CAPI Cluster"
+  node="$(docker ps --filter "label=io.x-k8s.kind.cluster=${capi}" \
+    --filter label=io.x-k8s.kind.role=control-plane --format '{{.Names}}' | head -n1)"
+  [[ -n "${node}" ]] || die "found no control-plane container for ${capi}"
+  server="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "${node}")"
+  [[ -n "${server}" ]] || die "could not read the address of ${node}"
+
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" apply -f "${TENANT_VALIDATE_RBAC}" >/dev/null
+  dir="${VALIDATE_DIR}/credential"
+  mkdir -m 0700 "${dir}"
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" -n nvke-validate create token nvke-validate \
+    --duration=2h >"${dir}/token"
+  kubectl --kubeconfig "${TENANT_KUBECONFIG}" config view --raw --minify \
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 --decode >"${dir}/ca.crt"
+  printf 'https://%s:6443' "${server}" >"${dir}/server"
+  kubectl -n default create secret generic "$(tenant_secret)" \
+    --from-file="${dir}/token" --from-file="${dir}/ca.crt" --from-file="${dir}/server" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  rm -rf "${dir}"
+}
+
+# Runs the validation image from a container on kind's Docker network, as the
+# management cluster's admin: the site checks, and the tenant's unless
+# TRIAL_SKIP_TENANT_VALIDATE=1. The expected versions come from what the site
+# was built from, not from the site: the controller's from the image the trial
+# deployed, Kubernetes' from the kind node image. The tenant's come from the
+# controller's record of it.
+validate() {
   if [[ "${REBUILD}" == 1 ]] || ! image_exists "${VALIDATE_IMAGE}"; then
     log "building the validation image ${VALIDATE_IMAGE}"
     gmk controller/test/e2e validate-image VALIDATE_IMAGE="${VALIDATE_IMAGE}" \
@@ -371,10 +411,22 @@ validate_site() {
 
   rm -rf "${VALIDATE_DIR}"
   mkdir -p "${VALIDATE_DIR}/artifacts"
+
+  local what="the site" tenant_env=(-e NVKE_TENANT_VALIDATE=false)
+  if [[ "${TRIAL_SKIP_TENANT_VALIDATE:-0}" != 1 ]]; then
+    tenant_credential
+    what="the site and tenant $(tenant_name)"
+    tenant_env=(
+      -e NVKE_TENANT_VALIDATE=true
+      -e NVKE_TENANT_CLUSTER="$(tenant_name)"
+      -e NVKE_TENANT_NAMESPACES="${TENANT_NAMESPACES}"
+    )
+  fi
+
   kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}" >"${VALIDATE_DIR}/kubeconfig"
   chmod 0600 "${VALIDATE_DIR}/kubeconfig"
 
-  log "validating the site: controller ${controller_version}, Kubernetes ${kubernetes_version}"
+  log "validating ${what}: controller ${controller_version}, Kubernetes ${kubernetes_version}"
   local name="nvke-validate-${KIND_CLUSTER_NAME}" rc=0
   docker rm -f "${name}" >/dev/null 2>&1 || true
   docker run --rm --name "${name}" --network kind --user "$(id -u):$(id -g)" \
@@ -384,15 +436,17 @@ validate_site() {
     -e NVKE_CONTROLLER_EXPECTED_VERSION="${controller_version}" \
     -e NVKE_SITE_KUBERNETES_VERSION="${kubernetes_version}" \
     -e NVKE_SITE_NAMESPACES="${SITE_NAMESPACES}" \
+    "${tenant_env[@]}" \
     "${VALIDATE_IMAGE}" >"${VALIDATE_DIR}/validate.log" 2>&1 || rc=$?
   rm -f "${VALIDATE_DIR}/kubeconfig"
+  kubectl -n default delete secret "$(tenant_secret)" --ignore-not-found >/dev/null || true
 
   grep -E '^(Ran [0-9]+ of|SUCCESS!|FAIL!)' "${VALIDATE_DIR}/validate.log" >&2 || true
   if ((rc != 0)); then
     grep -E '^\s*\[FAIL\]' "${VALIDATE_DIR}/validate.log" >&2 || true
-    die "site validation failed; see ${VALIDATE_DIR}/validate.log and ${VALIDATE_DIR}/artifacts"
+    die "validation failed; see ${VALIDATE_DIR}/validate.log and ${VALIDATE_DIR}/artifacts"
   fi
-  log "site validation passed; results in ${VALIDATE_DIR}"
+  log "validation passed; results in ${VALIDATE_DIR}"
 }
 
 # ------------------------------------------------------------------- commands
@@ -408,7 +462,7 @@ cmd_up() {
   create_tenant
   tenant_kubeconfig
   if [[ "${TRIAL_SKIP_VALIDATE:-0}" != 1 ]]; then
-    validate_site
+    validate
   fi
   cat >&2 <<EOF
 
@@ -451,7 +505,12 @@ cmd_validate() {
   if ! kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null || ! management_running; then
     die "the management cluster ${KIND_CLUSTER_NAME} is not running; run $0 up"
   fi
-  validate_site
+  if [[ "${TRIAL_SKIP_TENANT_VALIDATE:-0}" != 1 ]] && ! tenant_reachable; then
+    port_forward
+    register_site
+    tenant_kubeconfig
+  fi
+  validate
 }
 
 cmd_kubeconfig() {

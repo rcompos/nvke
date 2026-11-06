@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The identity nvke-validate reaches the trial's tenant as, applied in the
+# tenant by `trial/nvke-trial.sh validate`. The rights are the ones
+# controller/test/e2e/README.md ("Tenant checks") lists and no more: the
+# suite fails an identity that can read Secrets across the cluster or bind
+# roles.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nvke-validate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nvke-validate
+  namespace: nvke-validate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nvke-validate
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+    verbs: [get, list]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings, clusterrolebindings]
+    verbs: [get, list]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, list]
+  - nonResourceURLs: [/readyz, /readyz/*, /livez, /livez/*, /version]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nvke-validate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nvke-validate
+subjects:
+  - kind: ServiceAccount
+    name: nvke-validate
+    namespace: nvke-validate
+---
+# kubeadm-config and kube-vip's lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nvke-validate
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nvke-validate
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nvke-validate
+subjects:
+  - kind: ServiceAccount
+    name: nvke-validate
+    namespace: nvke-validate
+---
+# The probe namespace: the pods every check runs, and the objects the
+# `creates` checks make and delete.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nvke-validate-probes
+  namespace: nvke-validate
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, persistentvolumeclaims]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [create, get, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, delete, list]
+  - apiGroups: [cert-manager.io]
+    resources: [issuers, certificates]
+    verbs: [create, get, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nvke-validate-probes
+  namespace: nvke-validate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nvke-validate-probes
+subjects:
+  - kind: ServiceAccount
+    name: nvke-validate
+    namespace: nvke-validate
