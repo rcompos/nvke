@@ -156,6 +156,8 @@ Without a release description, the controller item runs two images that no regis
 
    The script patches the core, kubeadm control-plane and kubeadm bootstrap controllers and waits for each rollout. It prints `skip capd-system/capd-controller-manager (not installed)`, which is expected. Run it again after every `clusterctl init` or Cluster API upgrade.
 
+   On a site whose workload clusters come from another Cluster API infrastructure provider, add `--providers`: the script then also patches every provider Deployment `clusterctl` installed, found by its `cluster.x-k8s.io/provider` label, because that provider's controllers read the workload cluster kubeconfigs too. For a provider installed some other way, name its Deployment with `--deployment <NAMESPACE>/<NAME>`, adding `:<CONTAINER>` when its manager container is not named `manager` and it has more than one.
+
 ## Admit your networks to the NVKE API
 
 The controller chart admits the NVKE API only from pods in the management cluster. Add a NetworkPolicy for the networks that call the API.
