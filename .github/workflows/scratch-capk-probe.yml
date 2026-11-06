@@ -146,37 +146,64 @@ jobs:
             sleep 10
           done
 
-      - name: Wait for the control plane and both nodes
+      - name: Wait for the control-plane machine
         run: |
           set -Eeuo pipefail
-          start=$(date +%s)
-          deadline=$((start + 15 * 60))
-          last=""
-          while :; do
-            phases="$(kubectl get machines -n default \
-              -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null || true)"
-            state="$(sort <<<"${phases}" | tr '\n' ' ')"
-            if [[ "${state}" != "${last}" ]]; then
-              echo "$(( $(date +%s) - start )) s: ${state}"
-              last="${state}"
-            fi
-            running="$(grep -c '=Running$' <<<"${phases}" || true)"
-            (( running >= 2 )) && break
-            if (( $(date +%s) > deadline )); then
-              echo "::error::both machines were not Running in 15 minutes"
-              exit 1
-            fi
-            sleep 15
-          done
-          echo "both machines Running after $(( $(date +%s) - start )) s"
+          wait_machines() {
+            local want="$1" minutes="$2" start deadline last="" phases state running
+            start=$(date +%s)
+            deadline=$((start + minutes * 60))
+            while :; do
+              phases="$(kubectl get machines -n default \
+                -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+              state="$(sort <<<"${phases}" | tr '\n' ' ')"
+              if [[ "${state}" != "${last}" ]]; then
+                echo "$(( $(date +%s) - start )) s: ${state}"
+                last="${state}"
+              fi
+              running="$(grep -c '=Running$' <<<"${phases}" || true)"
+              (( running >= want )) && return 0
+              if (( $(date +%s) > deadline )); then
+                echo "::error::${want} machines were not Running in ${minutes} minutes"
+                return 1
+              fi
+              sleep 15
+            done
+          }
+          declare -f wait_machines > "${RUNNER_TEMP}/wait-machines.sh"
+          wait_machines 1 10
+
+      # CAPK's quickstart installs a CNI next; until then the nodes are
+      # NotReady. The API Service is a ClusterIP in the management cluster, so
+      # reach it through a port-forward.
+      - name: Install Calico on the workload cluster
+        run: |
+          set -Eeuo pipefail
           controller/.local/bin/clusterctl get kubeconfig "${CLUSTER_NAME}" -n default > "${RUNNER_TEMP}/workload.kubeconfig"
-          kubectl get svc -n default
-          # The API Service is a ClusterIP in the management cluster; reach it
-          # from a node of kind's through a port-forward.
-          kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 >/dev/null 2>&1 &
+          chmod 0600 "${RUNNER_TEMP}/workload.kubeconfig"
+          nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 > "${RUNNER_TEMP}/port-forward.log" 2>&1 &
           sleep 3
-          kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 \
-            --insecure-skip-tls-verify get nodes -o wide || true
+          wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 --insecure-skip-tls-verify "$@"; }
+          curl -fsSL https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml \
+            | sed -e 's|# - name: CALICO_IPV4POOL_CIDR|- name: CALICO_IPV4POOL_CIDR|' \
+                  -e 's|#   value: "192.168.0.0/16"|  value: "10.243.0.0/16"|' > "${RUNNER_TEMP}/calico.yaml"
+          grep -n -A1 'name: CALICO_IPV4POOL_CIDR' "${RUNNER_TEMP}/calico.yaml"
+          wk apply -f "${RUNNER_TEMP}/calico.yaml" > /dev/null
+          wk get nodes -o wide
+
+      - name: Wait for both machines and nodes
+        run: |
+          set -Eeuo pipefail
+          # shellcheck source=/dev/null
+          . "${RUNNER_TEMP}/wait-machines.sh"
+          wait_machines 2 15
+          wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 --insecure-skip-tls-verify "$@"; }
+          if ! wk get --raw /readyz > /dev/null 2>&1; then
+            nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 > "${RUNNER_TEMP}/port-forward.log" 2>&1 &
+            sleep 3
+          fi
+          wk wait --for=condition=Ready nodes --all --timeout=10m
+          wk get nodes -o wide
 
       - name: Diagnostics
         if: always()
@@ -198,6 +225,8 @@ jobs:
           kubectl run "port-probe-${RANDOM}" --rm -i --restart=Never --image=busybox:1.37 -- \
             sh -c "for t in ${targets}; do nc -zv -w 5 \${t%:*} \${t##*:} 2>&1; done"
           kubectl get kv -n kubevirt kubevirt -o jsonpath='{.spec.configuration.network}{"\n"}'
+          kubectl get machinesets -n default -o yaml | sed -n '/^  status:/,$p' | head -60
+          kubectl -n capi-system logs deploy/capi-controller-manager --tail=60 | grep -iE "machineset|preflight|skip|error" | tail -20
           kubectl get kubeadmcontrolplane -n default -o yaml | grep -A3 -E "type: (Initialized|Available|ControlPlaneComponentsHealthy)" | head -30
           kubectl -n capi-kubeadm-control-plane-system logs deploy/capi-kubeadm-control-plane-controller-manager --tail=40
           # The VM's serial console: cloud-init and kubeadm's output.
