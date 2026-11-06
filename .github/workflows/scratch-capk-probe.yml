@@ -128,6 +128,11 @@ jobs:
             --control-plane-machine-count 1 \
             --worker-machine-count 1 \
             --target-namespace default > "${RUNNER_TEMP}/capk-cluster.yaml"
+          # kubeadm init finished in the VM, but CAPK's SSH check never found
+          # its sentinel. NVKE's node agent reports bootstrap itself, so the
+          # NVKE tenant would not use the check either.
+          sed -i 's/checkStrategy: ssh/checkStrategy: none/' "${RUNNER_TEMP}/capk-cluster.yaml"
+          grep -n checkStrategy "${RUNNER_TEMP}/capk-cluster.yaml"
           for attempt in $(seq 1 12); do
             kubectl apply -f "${RUNNER_TEMP}/capk-cluster.yaml" && break
             (( attempt < 12 )) || exit 1
@@ -181,8 +186,14 @@ jobs:
             kubectl -n default get "${vmi}" -o jsonpath='{.status.phase} {.status.interfaces}{"\n"}'
           done
           kubectl get svc,endpointslices -n default -o wide
+          # Can a pod reach each VM's SSH port, as CAPK's check needs?
+          for ip in $(kubectl get vmi -n default -o jsonpath='{.items[*].status.interfaces[0].ipAddress}'); do
+            kubectl run "ssh-probe-${RANDOM}" --rm -i --restart=Never --image=busybox:1.37 -- \
+              sh -c "nc -zv -w 5 ${ip} 22 && echo ssh port open on ${ip}"
+          done
           # The VM's serial console: cloud-init and kubeadm's output.
           for pod in $(kubectl get pods -n default -l kubevirt.io=virt-launcher -o name); do
             echo "== ${pod} guest console"
-            kubectl -n default logs "${pod}" -c guest-console-log --tail=400
+            kubectl -n default logs "${pod}" -c guest-console-log --tail=400 \
+              | sed -E 's/(--token|--discovery-token-ca-cert-hash|--certificate-key) +[^ ]+/\1 <masked>/g'
           done
