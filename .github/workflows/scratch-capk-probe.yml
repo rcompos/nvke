@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# REVERT-WHEN-capk-probe-done: scratch only, never for a pull request.
+#
+# Phase A of the KubeVirt (CAPK) probe, with no NVKE: does a GitHub-hosted
+# amd64 runner boot a Cluster API cluster of KubeVirt VMs? kind, KubeVirt with
+# /dev/kvm, Cluster API with CAPK, then CAPK's own cluster template with its
+# published Ubuntu 24.04 disk, one control-plane VM and one worker.
+name: Scratch CAPK probe
+
+on:
+  push:
+    branches:
+      - scratch/capk-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scratch-capk-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KUBEVIRT_VERSION: v1.9.1
+  CAPK_VERSION: v0.11.2
+  NODE_VM_IMAGE: quay.io/capk/ubuntu-2404-container-disk:v1.34.1
+  KUBERNETES_VERSION: v1.34.1
+  CLUSTER_NAME: capk-probe
+
+jobs:
+  probe:
+    name: capk probe (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enable KVM access
+        run: |
+          set -Eeuo pipefail
+          if [[ ! -c /dev/kvm ]]; then
+            echo "::error::this runner has no /dev/kvm"
+            exit 1
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          nproc
+          free -g
+          df -h /
+
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_instances=1024
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+
+      - name: Read pinned tool versions
+        id: versions
+        run: |
+          {
+            echo "kind_version=$(make --no-print-directory print-KIND_VERSION)"
+            echo "kubectl_version=$(make --no-print-directory print-KUBECTL_VERSION)"
+            echo "capi_version=$(make -s -C controller --no-print-directory print-CAPI_CORE_VERSION)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up kind and kubectl
+        uses: ./.github/actions/setup-kind
+        with:
+          kind_version: ${{ steps.versions.outputs.kind_version }}
+          kubectl_version: ${{ steps.versions.outputs.kubectl_version }}
+
+      - name: Create the management cluster
+        run: |
+          set -Eeuo pipefail
+          kind create cluster --name capk-probe --wait 5m
+          kubectl get nodes -o wide
+
+      - name: Install KubeVirt
+        run: |
+          set -Eeuo pipefail
+          base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
+          kubectl apply -f "${base}/kubevirt-operator.yaml"
+          kubectl apply -f "${base}/kubevirt-cr.yaml"
+          start=$(date +%s)
+          kubectl -n kubevirt wait kv kubevirt --for condition=Available --timeout=15m
+          echo "KubeVirt Available after $(( $(date +%s) - start )) s"
+          kubectl -n kubevirt get kv kubevirt -o jsonpath='{.status.conditions}' | jq .
+          kubectl get nodes -o jsonpath='{.items[0].status.allocatable}' | jq .
+
+      - name: Install Cluster API and CAPK
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CAPI_VERSION: ${{ steps.versions.outputs.capi_version }}
+        run: |
+          set -Eeuo pipefail
+          make -C controller clusterctl-install
+          controller/.local/bin/clusterctl init \
+            --core "cluster-api:${CAPI_VERSION}" \
+            --bootstrap "kubeadm:${CAPI_VERSION}" \
+            --control-plane "kubeadm:${CAPI_VERSION}" \
+            --infrastructure "kubevirt:${CAPK_VERSION}" \
+            --wait-providers
+          kubectl get deploy -A -l cluster.x-k8s.io/provider
+
+      - name: Create the CAPK cluster
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          NODE_VM_IMAGE_TEMPLATE="${NODE_VM_IMAGE}" CRI_PATH=/var/run/containerd/containerd.sock \
+            controller/.local/bin/clusterctl generate cluster "${CLUSTER_NAME}" \
+            --infrastructure "kubevirt:${CAPK_VERSION}" \
+            --kubernetes-version "${KUBERNETES_VERSION}" \
+            --control-plane-machine-count 1 \
+            --worker-machine-count 1 \
+            --target-namespace default > "${RUNNER_TEMP}/capk-cluster.yaml"
+          kubectl apply -f "${RUNNER_TEMP}/capk-cluster.yaml"
+
+      - name: Wait for the control plane and both nodes
+        run: |
+          set -Eeuo pipefail
+          start=$(date +%s)
+          deadline=$((start + 30 * 60))
+          last=""
+          while :; do
+            phases="$(kubectl get machines -n default \
+              -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+            state="$(sort <<<"${phases}" | tr '\n' ' ')"
+            if [[ "${state}" != "${last}" ]]; then
+              echo "$(( $(date +%s) - start )) s: ${state}"
+              last="${state}"
+            fi
+            running="$(grep -c '=Running$' <<<"${phases}" || true)"
+            (( running >= 2 )) && break
+            if (( $(date +%s) > deadline )); then
+              echo "::error::both machines were not Running in 30 minutes"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "both machines Running after $(( $(date +%s) - start )) s"
+          controller/.local/bin/clusterctl get kubeconfig "${CLUSTER_NAME}" -n default > "${RUNNER_TEMP}/workload.kubeconfig"
+          kubectl get svc -n default
+          # The API Service is a ClusterIP in the management cluster; reach it
+          # from a node of kind's through a port-forward.
+          kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 >/dev/null 2>&1 &
+          sleep 3
+          kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 \
+            --insecure-skip-tls-verify get nodes -o wide || true
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e -uo pipefail
+          kubectl get clusters,machines,kubevirtclusters,kubevirtmachines -A -o wide
+          kubectl get vm,vmi -A -o wide
+          kubectl get pods -A -o wide
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60
+          kubectl -n capk-system logs deploy/capk-controller-manager --tail=200
+          for vmi in $(kubectl get vmi -n default -o name); do
+            echo "== ${vmi}"
+            kubectl -n default get "${vmi}" -o jsonpath='{.status.phase} {.status.interfaces}{"\n"}'
+          done
