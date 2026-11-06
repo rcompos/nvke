@@ -8,9 +8,11 @@
 # Every NVKE image and binary is built here; nothing is pulled from an NVKE
 # registry.
 #
-# usage: trial/nvke-trial.sh [up|status|kubeconfig|down]
+# usage: trial/nvke-trial.sh [up|validate|status|kubeconfig|down]
 #
-#   up          build, deploy, create the tenant, and write its kubeconfig
+#   up          build, deploy, create the tenant, write its kubeconfig, then
+#               validate the site
+#   validate    run the nvke-validate site checks; results in .state/validate
 #   status      show the management plane, the tenant and its containers
 #   kubeconfig  write the tenant kubeconfig again
 #   down        delete the tenant, then the management cluster
@@ -22,6 +24,7 @@
 #   TRIAL_WAIT_MINUTES how long to wait for the tenant (default 30)
 #   TRIAL_REBUILD      1 rebuilds the images and nvkectl even if they exist
 #   TRIAL_SKIP_DISK_CHECK 1 skips the free-disk check
+#   TRIAL_SKIP_VALIDATE 1 ends `up` without validating the site
 #
 # The CNI is Calico: Docker Desktop's kernel has no openvswitch module, so the
 # default OVN-Kubernetes cannot run on its nodes.
@@ -39,6 +42,11 @@ REBUILD="${TRIAL_REBUILD:-0}"
 
 CONTROLLER_IMAGE="nvke-controller:trial"
 NODE_IMAGE="cwe-capd-kindest-node:local"
+VALIDATE_IMAGE="nvke-validate:trial"
+VALIDATE_DIR="${STATE_DIR}/validate"
+# Every namespace the trial installs into that must run a ready pod. The
+# suite's default list is the NICo deploy path's.
+SITE_NAMESPACES="kube-system,cert-manager,capi-system,capi-kubeadm-bootstrap-system,capi-kubeadm-control-plane-system,capd-system,nvke-controller,postgres,spire-server,temporal"
 NVKECTL="${REPO_ROOT}/cli/bin/nvkectl"
 CLUSTERCTL="${REPO_ROOT}/controller/.local/bin/clusterctl"
 TENANT_SPEC="${TRIAL_DIR}/tenant.yaml"
@@ -340,6 +348,53 @@ tenant_kubeconfig() {
   kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide
 }
 
+# ------------------------------------------------------------------- validate
+
+# Runs the validation image's site checks from a container on kind's Docker
+# network, as the management cluster's admin. The expected versions come from
+# what the site was built from, not from the site: the controller's from the
+# image the trial deployed, Kubernetes' from the kind node image.
+validate_site() {
+  if [[ "${REBUILD}" == 1 ]] || ! image_exists "${VALIDATE_IMAGE}"; then
+    log "building the validation image ${VALIDATE_IMAGE}"
+    gmk controller/test/e2e validate-image VALIDATE_IMAGE="${VALIDATE_IMAGE}" \
+      VALIDATE_PLATFORM="linux/${DOCKER_ARCH}"
+  fi
+
+  local controller_version kubernetes_version node_image
+  controller_version="$(docker run --rm "${CONTROLLER_IMAGE}" controller --version | awk '{print $2}')"
+  [[ -n "${controller_version}" ]] || die "could not read the version of ${CONTROLLER_IMAGE}"
+  node_image="$(docker inspect -f '{{.Config.Image}}' "${KIND_CLUSTER_NAME}-control-plane")"
+  kubernetes_version="${node_image%%@*}"
+  kubernetes_version="${kubernetes_version##*:}"
+  [[ "${kubernetes_version}" == v* ]] || die "could not read the Kubernetes version from the kind node image ${node_image}"
+
+  rm -rf "${VALIDATE_DIR}"
+  mkdir -p "${VALIDATE_DIR}/artifacts"
+  kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}" >"${VALIDATE_DIR}/kubeconfig"
+  chmod 0600 "${VALIDATE_DIR}/kubeconfig"
+
+  log "validating the site: controller ${controller_version}, Kubernetes ${kubernetes_version}"
+  local name="nvke-validate-${KIND_CLUSTER_NAME}" rc=0
+  docker rm -f "${name}" >/dev/null 2>&1 || true
+  docker run --rm --name "${name}" --network kind --user "$(id -u):$(id -g)" \
+    -v "${VALIDATE_DIR}/artifacts:/artifacts" \
+    -v "${VALIDATE_DIR}/kubeconfig:/kube/config:ro" \
+    -e KUBECONFIG=/kube/config \
+    -e NVKE_CONTROLLER_EXPECTED_VERSION="${controller_version}" \
+    -e NVKE_SITE_KUBERNETES_VERSION="${kubernetes_version}" \
+    -e NVKE_SITE_NAMESPACES="${SITE_NAMESPACES}" \
+    "${VALIDATE_IMAGE}" >"${VALIDATE_DIR}/validate.log" 2>&1 || rc=$?
+  rm -f "${VALIDATE_DIR}/kubeconfig"
+
+  grep -E '^(Ran [0-9]+ of|SUCCESS!|FAIL!)' "${VALIDATE_DIR}/validate.log" >&2 || true
+  if ((rc != 0)); then
+    grep -E '^\s*\[FAIL\]' "${VALIDATE_DIR}/validate.log" >&2 || true
+    die "site validation failed; see ${VALIDATE_DIR}/validate.log and ${VALIDATE_DIR}/artifacts"
+  fi
+  log "site validation passed; results in ${VALIDATE_DIR}"
+}
+
 # ------------------------------------------------------------------- commands
 
 cmd_up() {
@@ -352,6 +407,9 @@ cmd_up() {
   register_site
   create_tenant
   tenant_kubeconfig
+  if [[ "${TRIAL_SKIP_VALIDATE:-0}" != 1 ]]; then
+    validate_site
+  fi
   cat >&2 <<EOF
 
 [nvke-trial] done. The tenant is running:
@@ -386,6 +444,14 @@ cmd_status() {
   log "tenant containers"
   docker ps --filter "label=io.x-k8s.kind.role" --format '{{.Names}}\t{{.Status}}' \
     | grep -v "^${KIND_CLUSTER_NAME}-" || true
+}
+
+cmd_validate() {
+  preflight
+  if ! kind get clusters 2>/dev/null | grep -Fx "${KIND_CLUSTER_NAME}" >/dev/null || ! management_running; then
+    die "the management cluster ${KIND_CLUSTER_NAME} is not running; run $0 up"
+  fi
+  validate_site
 }
 
 cmd_kubeconfig() {
@@ -461,9 +527,10 @@ delete_tenant() {
 
 case "${1:-up}" in
   up) cmd_up ;;
+  validate) cmd_validate ;;
   status) cmd_status ;;
   kubeconfig) cmd_kubeconfig ;;
   down) cmd_down ;;
-  -h | --help | help) sed -n '5,27p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$1'; use up, status, kubeconfig or down" ;;
+  -h | --help | help) sed -n '5,31p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1'; use up, validate, status, kubeconfig or down" ;;
 esac
