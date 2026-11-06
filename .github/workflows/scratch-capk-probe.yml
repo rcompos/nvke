@@ -112,6 +112,8 @@ jobs:
             --control-plane "kubeadm:${CAPI_VERSION}" \
             --infrastructure "kubevirt:${CAPK_VERSION}" \
             --wait-providers
+          # --wait-providers can return before a provider's webhook serves.
+          kubectl wait deployment -A -l cluster.x-k8s.io/provider --for=condition=Available --timeout=5m
           kubectl get deploy -A -l cluster.x-k8s.io/provider
 
       - name: Create the CAPK cluster
@@ -126,7 +128,12 @@ jobs:
             --control-plane-machine-count 1 \
             --worker-machine-count 1 \
             --target-namespace default > "${RUNNER_TEMP}/capk-cluster.yaml"
-          kubectl apply -f "${RUNNER_TEMP}/capk-cluster.yaml"
+          for attempt in $(seq 1 12); do
+            kubectl apply -f "${RUNNER_TEMP}/capk-cluster.yaml" && break
+            (( attempt < 12 )) || exit 1
+            echo "attempt ${attempt}: a webhook is not serving yet; retrying in 10 s"
+            sleep 10
+          done
 
       - name: Wait for the control plane and both nodes
         run: |
