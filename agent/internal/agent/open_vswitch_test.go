@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,47 @@ func TestOpenVSwitchReconciliationTransformsNetplanAndVerifiesBridge(t *testing.
 	assert.Contains(t, bridge, "openvswitch")
 	assert.Equal(t, []any{"eth0"}, bridge["interfaces"])
 	assert.Equal(t, map[string]any{"addresses": []any{"10.0.0.53"}}, bridge["nameservers"])
+}
+
+func TestOpenVSwitchNetplanPinsLocallyAdministeredMAC(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "etc/netplan"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "etc/netplan/50-cloud-init.yaml"), []byte(`network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+`), 0o600))
+	runner := newOpenVSwitchTestRunner(t, map[string][]openVSwitchCommandResult{
+		"ovs-vsctl set bridge breth0 external-ids:bridge-uplink=eth0":           {{}, {}, {}},
+		"ovs-vsctl br-get-external-id breth0 bridge-uplink":                     {{output: []byte("eth0\n")}, {output: []byte("eth0\n")}, {output: []byte("eth0\n")}, {output: []byte("eth0\n")}},
+		"dpkg-query --show --showformat=${db:Status-Abbrev} openvswitch-switch": {{output: []byte("ii ")}},
+		"systemctl enable --now openvswitch-switch":                             {{}},
+		"ip -j route show default": {
+			{output: []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0"}]`)},
+			{output: []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"breth0"}]`)},
+		},
+		"ovs-vsctl list-br": {
+			{output: nil},
+			{output: []byte("breth0\n")},
+		},
+		"ip -j link show dev eth0":                                          {{output: []byte(`[{"ifname":"eth0","address":"02:11:22:33:44:55","mtu":1500}]`)}},
+		"systemctl restart ovs-vswitchd":                                    {{}},
+		"netplan generate":                                                  {{}},
+		"ovs-vsctl --may-exist add-br breth0":                               {{}},
+		"ovs-vsctl set bridge breth0 other-config:hwaddr=02:11:22:33:44:55": {{}},
+		"netplan apply":                                                     {{}},
+	})
+	server := &NodeAgentServer{Runner: runner, RootPath: root, openVSwitchSettleDelay: 1}
+
+	result, _, err := server.reconcileOpenVSwitchLocked(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, pb.OpenVSwitchReconciliationResult_OUTCOME_CONFIGURED, result.GetOutcome())
+	hwaddr := slices.Index(runner.calls, "ovs-vsctl set bridge breth0 other-config:hwaddr=02:11:22:33:44:55")
+	apply := slices.Index(runner.calls, "netplan apply")
+	require.GreaterOrEqual(t, hwaddr, 0)
+	assert.Less(t, hwaddr, apply)
 }
 
 func TestOpenVSwitchNetplanMatchNamePatterns(t *testing.T) {

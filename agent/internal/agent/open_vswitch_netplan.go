@@ -181,6 +181,17 @@ func (s *NodeAgentServer) applyOpenVSwitchNetplanPlan(ctx context.Context, plan 
 	if _, err := s.runOpenVSwitchCommand("netplan", "generate"); err != nil {
 		return fmt.Errorf("validate netplan: %w", err)
 	}
+	// OVS auto-inherits globally unique NIC MACs, but not locally administered
+	// ones, such as a KubeVirt pod-network NIC's. Pin the latter before netplan
+	// moves DHCP to the bridge, so the DHCP server still knows the client.
+	if openVSwitchMACIsLocallyAdministered(plan.uplinkMAC) {
+		if _, err := s.runOpenVSwitchCommand("ovs-vsctl", "--may-exist", "add-br", plan.bridgeName); err != nil {
+			return err
+		}
+		if _, err := s.runOpenVSwitchCommand("ovs-vsctl", "set", "bridge", plan.bridgeName, "other-config:hwaddr="+plan.uplinkMAC); err != nil {
+			return err
+		}
+	}
 	if _, err := s.runOpenVSwitchCommand("netplan", "apply"); err != nil {
 		return fmt.Errorf("apply netplan: %w", err)
 	}
