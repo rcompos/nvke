@@ -50,15 +50,35 @@ controlPlaneConfig:
           mkdir -p /etc/systemd/system/spire-agent.service.d
           printf '[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\n' \
             > /etc/systemd/system/spire-agent.service.d/override.conf
+          # OVN-Kubernetes needs Open vSwitch and its kernel module on the node.
+          if [ -f cni-charts.deb ]; then
+            if ! modprobe openvswitch; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-modules-extra-$(uname -r)"
+              modprobe openvswitch
+            fi
+            if ! command -v ovs-vsctl >/dev/null; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y openvswitch-switch
+            fi
+            systemctl enable --now openvswitch-switch
+          fi
+          # This disk ships containerd as a binary, not as the packages the CNI
+          # debs depend on.
+          # The OVN images package imports with ctr, by default /usr/local/bin/ctr.
+          NKE_CTR_BIN="$(command -v ctr)"
+          export NKE_CTR_BIN
           for deb in *.deb; do
-            if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
+            if [ -f "${deb}" ]; then dpkg --ignore-depends=containerd,nvke-kubeadm-distro -i "${deb}"; fi
           done
           # The tenant VMs sit in the management cluster's pod network, whose
           # Calico drops packets a VM sends from any address but its own, so
           # tenant pod traffic must always be encapsulated.
-          sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' \
-            /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
-          grep -q 'encapsulation: VXLAN$' /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+          calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+          if [ -f "${calico_cr}" ]; then
+            sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' "${calico_cr}"
+            grep -q 'encapsulation: VXLAN$' "${calico_cr}"
+          fi
           # containerd 1.7 on this disk withholds NET_BIND_SERVICE from non-root
           # containers, and node-local-dns binds port 53 as non-root. containerd
           # 2.x allows unprivileged ports by default.
@@ -76,7 +96,7 @@ controlPlaneConfig:
           # Copy the node's logs to the serial console, which the trial's
           # diagnostics read through the launcher pod.
           printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd > /dev/ttyS0'" \
+            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server > /dev/ttyS0'" \
             'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
             > /etc/systemd/system/nvke-trial-console.service
           systemctl daemon-reload
@@ -159,15 +179,35 @@ nodePools:
             mkdir -p /etc/systemd/system/spire-agent.service.d
             printf '[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\n' \
               > /etc/systemd/system/spire-agent.service.d/override.conf
+            # OVN-Kubernetes needs Open vSwitch and its kernel module on the node.
+            if [ -f cni-charts.deb ]; then
+              if ! modprobe openvswitch; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-modules-extra-$(uname -r)"
+                modprobe openvswitch
+              fi
+              if ! command -v ovs-vsctl >/dev/null; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y openvswitch-switch
+              fi
+              systemctl enable --now openvswitch-switch
+            fi
+            # This disk ships containerd as a binary, not as the packages the CNI
+            # debs depend on.
+            # The OVN images package imports with ctr, by default /usr/local/bin/ctr.
+            NKE_CTR_BIN="$(command -v ctr)"
+            export NKE_CTR_BIN
             for deb in *.deb; do
-              if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
+              if [ -f "${deb}" ]; then dpkg --ignore-depends=containerd,nvke-kubeadm-distro -i "${deb}"; fi
             done
             # The tenant VMs sit in the management cluster's pod network, whose
             # Calico drops packets a VM sends from any address but its own, so
             # tenant pod traffic must always be encapsulated.
-            sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' \
-              /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
-            grep -q 'encapsulation: VXLAN$' /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+            calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+            if [ -f "${calico_cr}" ]; then
+              sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' "${calico_cr}"
+              grep -q 'encapsulation: VXLAN$' "${calico_cr}"
+            fi
             # containerd 1.7 on this disk withholds NET_BIND_SERVICE from non-root
             # containers, and node-local-dns binds port 53 as non-root. containerd
             # 2.x allows unprivileged ports by default.
@@ -185,7 +225,7 @@ nodePools:
             # Copy the node's logs to the serial console, which the trial's
             # diagnostics read through the launcher pod.
             printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd > /dev/ttyS0'" \
+              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server > /dev/ttyS0'" \
               'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
               > /etc/systemd/system/nvke-trial-console.service
             systemctl daemon-reload

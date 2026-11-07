@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 120
     env:
       TRIAL_PROVIDER: capk
+      TRIAL_CNI: ovn-kubernetes
       TRIAL_WAIT_MINUTES: "40"
       MGMT_KUBECONFIG: ${{ github.workspace }}/trial/.state/mgmt.kubeconfig
       TENANT_KUBECONFIG: ${{ github.workspace }}/trial/.state/tenant.kubeconfig
@@ -159,6 +160,11 @@ jobs:
             for pod in $(kubectl -n calico-system get pods -l k8s-app=calico-node -o name); do
               echo "== tenant ${pod}"
               kubectl -n calico-system logs "${pod}" -c calico-node --tail=60 | mask
+            done
+            kubectl get pods -A --no-headers | awk '$2 ~ /^ovn/ {print $1 "/" $2}' | while read -r pod; do
+              echo "== tenant ${pod}"
+              kubectl -n "${pod%/*}" describe pod "${pod#*/}" | sed -n '/^Containers:/,/^Conditions:/p' | grep -E '^  [a-z]|State|Reason|Exit Code|Restart Count'
+              kubectl -n "${pod%/*}" logs "${pod#*/}" --all-containers --tail=40 | mask
             done
           fi
           true

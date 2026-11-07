@@ -34,9 +34,12 @@
 #                      Linux with /dev/kvm, amd64. The host needs a route to the
 #                      management cluster's pod network, which the trial adds
 #                      with sudo when it can.
+#   TRIAL_CNI          calico (default) or ovn-kubernetes. OVN needs the
+#                      openvswitch kernel module on the tenant nodes, so it
+#                      runs with TRIAL_PROVIDER=capk only.
 #
-# The CNI is Calico: Docker Desktop's kernel has no openvswitch module, so the
-# default OVN-Kubernetes cannot run on its nodes.
+# The CNI defaults to Calico: Docker Desktop's kernel has no openvswitch module,
+# so the default OVN-Kubernetes cannot run on its nodes.
 
 set -Eeuo pipefail
 
@@ -69,6 +72,7 @@ CAPI_CLUSTER_FILE="${STATE_DIR}/capi-cluster-name"
 SITE_NAME="trial"
 
 PROVIDER="${TRIAL_PROVIDER:-capd}"
+CNI="${TRIAL_CNI:-calico}"
 KUBEVIRT_VERSION="v1.9.1"
 CAPK_VERSION="v0.11.2"
 CALICO_MANIFEST_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml"
@@ -161,6 +165,11 @@ preflight() {
       [[ "${DOCKER_ARCH}" == amd64 ]] || die "TRIAL_PROVIDER=capk runs on amd64"
       ;;
     *) die "TRIAL_PROVIDER is capd or capk, not ${PROVIDER}" ;;
+  esac
+  case "${CNI}" in
+    calico) ;;
+    ovn-kubernetes) [[ "${PROVIDER}" == capk ]] || die "TRIAL_CNI=ovn-kubernetes needs TRIAL_PROVIDER=capk" ;;
+    *) die "TRIAL_CNI is calico or ovn-kubernetes, not ${CNI}" ;;
   esac
 
   check_disk
@@ -290,12 +299,14 @@ calico_package() {
 build() {
   calico_package
   if [[ "${PROVIDER}" == capk ]]; then
-    if [[ "${REBUILD}" == 1 ]] || [[ ! -s "${CAPK_PACKAGES_DIR}/files.txt" ]]; then
-      log "building the tenant node bundles (nvke-agent, spire-agent, Calico) into ${CAPK_PACKAGES_DIR}"
+    if [[ "${REBUILD}" == 1 ]] || [[ ! -s "${CAPK_PACKAGES_DIR}/files.txt" ]] \
+      || [[ "$(cat "${CAPK_PACKAGES_DIR}/.cni" 2>/dev/null)" != "${CNI}" ]]; then
+      log "building the tenant node bundles (nvke-agent, spire-agent, ${CNI}) into ${CAPK_PACKAGES_DIR}"
       rm -rf "${CAPK_PACKAGES_DIR}"
-      CNI_PLUGIN=calico INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \
+      CNI_PLUGIN="${CNI}" INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \
         CAPD_NODE_BUNDLES_OUT="${CAPK_PACKAGES_DIR}" gmk controller capd-image
       [[ -s "${CAPK_PACKAGES_DIR}/files.txt" ]] || die "the node bundles were not written to ${CAPK_PACKAGES_DIR}"
+      printf '%s\n' "${CNI}" > "${CAPK_PACKAGES_DIR}/.cni"
     else
       log "tenant node bundles: already built"
     fi
@@ -429,8 +440,14 @@ create_tenant() {
   if tenant_json >/dev/null; then
     log "tenant ${name}: already exists"
   else
-    log "creating tenant ${name} from ${TENANT_SPEC}"
-    nvkectl create cluster -f "${TENANT_SPEC}"
+    local spec="${TENANT_SPEC}"
+    if [[ "${CNI}" != calico ]]; then
+      spec="${STATE_DIR}/tenant-${CNI}.yaml"
+      sed "s/^cniPlugin: calico$/cniPlugin: ${CNI}/" "${TENANT_SPEC}" > "${spec}"
+      grep -q "^cniPlugin: ${CNI}$" "${spec}" || die "could not set cniPlugin in ${spec}"
+    fi
+    log "creating tenant ${name} from ${spec}"
+    nvkectl create cluster -f "${spec}"
   fi
 
   log "waiting up to ${WAIT_MINUTES} minutes for ${name} to be provisioned"
