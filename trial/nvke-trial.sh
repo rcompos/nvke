@@ -196,6 +196,15 @@ management_calico() {
   fi
   kubectl -n kube-system rollout status daemonset/calico-node --timeout=10m
   kubectl wait --for=condition=Ready nodes --all --timeout=10m >/dev/null
+  # Tenant Calico tunnels pod traffic between VMs in VXLAN, which this
+  # cluster's Felix drops from workloads unless allowed.
+  local _
+  for _ in $(seq 60); do
+    kubectl get felixconfigurations.crd.projectcalico.org default >/dev/null 2>&1 && break
+    sleep 2
+  done
+  kubectl patch felixconfigurations.crd.projectcalico.org default --type merge \
+    -p '{"spec":{"allowVXLANPacketsFromWorkloads":true}}' >/dev/null
 }
 
 # The tenant's API servers listen on VM addresses in the management cluster's
