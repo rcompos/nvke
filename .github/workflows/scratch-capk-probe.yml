@@ -139,6 +139,11 @@ jobs:
           # NVKE tenant would not use the check either.
           sed -i 's/checkStrategy: ssh/checkStrategy: none/' "${RUNNER_TEMP}/capk-cluster.yaml"
           grep -n checkStrategy "${RUNNER_TEMP}/capk-cluster.yaml"
+          # CAPK's v1beta1 worker template has only `kubeletExtraArgs: {}` in
+          # nodeRegistration. Converted to v1beta2 that is empty, which the
+          # v1beta2 schema rejects (minProperties 1), so no worker is created.
+          sed -i 's|^          kubeletExtraArgs: {}$|          criSocket: /var/run/containerd/containerd.sock|' "${RUNNER_TEMP}/capk-cluster.yaml"
+          grep -n -A1 "nodeRegistration:" "${RUNNER_TEMP}/capk-cluster.yaml"
           for attempt in $(seq 1 12); do
             kubectl apply -f "${RUNNER_TEMP}/capk-cluster.yaml" && break
             (( attempt < 12 )) || exit 1
