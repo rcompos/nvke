@@ -84,7 +84,24 @@ jobs:
       - name: Create the management cluster
         run: |
           set -Eeuo pipefail
-          kind create cluster --name capk-probe --wait 5m
+          # KubeVirt's bridge binding gives each guest its launcher pod's IP.
+          # kind's kindnet routes point-to-point and bridge does not work on
+          # it, so use Calico, as CAPK's quickstart does. Masquerade instead
+          # gives every guest 10.0.2.2, which breaks a multi-node cluster.
+          cat > "${RUNNER_TEMP}/kind.yaml" <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          networking:
+            disableDefaultCNI: true
+            podSubnet: 10.244.0.0/16
+          EOF
+          kind create cluster --name capk-probe --config "${RUNNER_TEMP}/kind.yaml"
+          curl -fsSL https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml \
+            | sed -e 's|# - name: CALICO_IPV4POOL_CIDR|- name: CALICO_IPV4POOL_CIDR|' \
+                  -e 's|#   value: "192.168.0.0/16"|  value: "10.244.0.0/16"|' \
+            | kubectl apply -f - > /dev/null
+          kubectl wait --for=condition=Ready nodes --all --timeout=5m
+          kubectl -n kube-system rollout status ds/calico-node --timeout=5m
           kubectl get nodes -o wide
 
       - name: Install KubeVirt
@@ -93,12 +110,6 @@ jobs:
           base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
           kubectl apply -f "${base}/kubevirt-operator.yaml"
           kubectl apply -f "${base}/kubevirt-cr.yaml"
-          # KubeVirt's default pod-network binding is bridge, which hands the
-          # pod's address to the guest; on kind nothing then reaches the VM
-          # (a pod's connection to its port 22 timed out). Masquerade keeps the
-          # address on the launcher pod and forwards to the guest.
-          kubectl -n kubevirt patch kv kubevirt --type merge \
-            -p '{"spec":{"configuration":{"network":{"defaultNetworkInterface":"masquerade"}}}}'
           start=$(date +%s)
           kubectl -n kubevirt wait kv kubevirt --for condition=Available --timeout=15m
           echo "KubeVirt Available after $(( $(date +%s) - start )) s"
