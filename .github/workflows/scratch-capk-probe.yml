@@ -197,9 +197,25 @@ jobs:
           set -Eeuo pipefail
           controller/.local/bin/clusterctl get kubeconfig "${CLUSTER_NAME}" -n default > "${RUNNER_TEMP}/workload.kubeconfig"
           chmod 0600 "${RUNNER_TEMP}/workload.kubeconfig"
-          nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 > "${RUNNER_TEMP}/port-forward.log" 2>&1 &
-          sleep 3
+          cat > "${RUNNER_TEMP}/workload-api.sh" <<'EOF'
           wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 --insecure-skip-tls-verify "$@"; }
+          # (Re)start the port-forward to the workload API until it answers.
+          workload_api() {
+            local i
+            for i in $(seq 1 24); do
+              wk get --raw /readyz > /dev/null 2>&1 && return 0
+              pkill -f "port-forward svc/${CLUSTER_NAME}-lb" || true
+              nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 >> "${RUNNER_TEMP}/port-forward.log" 2>&1 &
+              sleep 5
+            done
+            echo "::error::the workload API did not answer through the port-forward"
+            cat "${RUNNER_TEMP}/port-forward.log"
+            return 1
+          }
+          EOF
+          # shellcheck source=/dev/null
+          . "${RUNNER_TEMP}/workload-api.sh"
+          workload_api
           curl -fsSL https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml \
             | sed -e 's|# - name: CALICO_IPV4POOL_CIDR|- name: CALICO_IPV4POOL_CIDR|' \
                   -e 's|#   value: "192.168.0.0/16"|  value: "10.243.0.0/16"|' > "${RUNNER_TEMP}/calico.yaml"
@@ -213,11 +229,9 @@ jobs:
           # shellcheck source=/dev/null
           . "${RUNNER_TEMP}/wait-machines.sh"
           wait_machines 2 15
-          wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 --insecure-skip-tls-verify "$@"; }
-          if ! wk get --raw /readyz > /dev/null 2>&1; then
-            nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 > "${RUNNER_TEMP}/port-forward.log" 2>&1 &
-            sleep 3
-          fi
+          # shellcheck source=/dev/null
+          . "${RUNNER_TEMP}/workload-api.sh"
+          workload_api
           wk wait --for=condition=Ready nodes --all --timeout=10m
           wk get nodes -o wide
 
