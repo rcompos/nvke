@@ -124,7 +124,8 @@ jobs:
           for pod in $(kubectl get pods -A -l kubevirt.io=virt-launcher -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'); do
             echo "== ${pod} guest console"
             kubectl -n "${pod%/*}" logs "${pod#*/}" -c guest-console-log --tail=400 \
-              | sed -E 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g'
+              | sed -E -e 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g' \
+                  -e 's/("?(token|certificateKey|caCertHashes|password|secret)"?) *[:=] *("[^"]*"|[^ ,}]+)/\1: <masked>/Ig'
           done
           true
 

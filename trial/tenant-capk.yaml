@@ -18,7 +18,10 @@ etcdEncrypted: false
 
 controlPlaneConfig:
   desiredCount: 1
-  systemReservedMemory: "1Gi"
+  # Off container nodes the kubelet also reserves 2Gi and one CPU for
+  # Kubernetes components, which the control plane cannot lower; the VM is
+  # sized so something is left.
+  systemReservedMemory: "512Mi"
   infra:
     bootstrapFiles:
       - path: /usr/local/sbin/nvke-trial-install
@@ -50,13 +53,20 @@ controlPlaneConfig:
           for deb in *.deb; do
             if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
           done
+          # Copy the node's logs to the serial console, which the trial's
+          # diagnostics read through the launcher pod.
+          printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
+            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd > /dev/ttyS0'" \
+            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+            > /etc/systemd/system/nvke-trial-console.service
           systemctl daemon-reload
+          systemctl enable --now nvke-trial-console.service
           systemctl enable nvke-agent.service spire-agent.service
           systemctl restart spire-agent.service
           cd /
           rm -rf "${work}"
     preKubeadmCommands:
-      - "/usr/local/sbin/nvke-trial-install > /var/log/nvke-trial-install.log 2>&1"
+      - "/usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log > /dev/ttyS0"
     machineTemplate:
       apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
       kind: KubevirtMachineTemplate
@@ -76,7 +86,7 @@ controlPlaneConfig:
                       cpu:
                         cores: 2
                       memory:
-                        guest: "3Gi"
+                        guest: "4Gi"
                       devices:
                         networkInterfaceMultiqueue: true
                         disks:
@@ -94,7 +104,8 @@ nodePools:
     nodeNamePrefix: w
     desiredNodeCount: 1
     controlPlane: false
-    systemReservedMemory: "1Gi"
+    systemReservedMemory: "512Mi"
+    kubeReservedMemory: "512Mi"
     nodeLabels:
       tier: compute
     autoProvisionDisabled: false
@@ -131,13 +142,20 @@ nodePools:
             for deb in *.deb; do
               if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
             done
+            # Copy the node's logs to the serial console, which the trial's
+            # diagnostics read through the launcher pod.
+            printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
+              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd > /dev/ttyS0'" \
+              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+              > /etc/systemd/system/nvke-trial-console.service
             systemctl daemon-reload
+            systemctl enable --now nvke-trial-console.service
             systemctl enable nvke-agent.service spire-agent.service
             systemctl restart spire-agent.service
             cd /
             rm -rf "${work}"
       preKubeadmCommands:
-        - "/usr/local/sbin/nvke-trial-install > /var/log/nvke-trial-install.log 2>&1"
+        - "/usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log > /dev/ttyS0"
       machineTemplate:
         apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
         kind: KubevirtMachineTemplate
