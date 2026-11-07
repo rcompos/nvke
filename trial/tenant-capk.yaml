@@ -31,7 +31,7 @@ controlPlaneConfig:
           #!/bin/bash
           # Install the node bundles from the trial's package server.
           set -euxo pipefail
-          packages=http://10.96.100.100:8080
+          packages=http://10.128.100.100:8080
           work="$(mktemp -d)"
           cd "${work}"
           curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"
@@ -120,7 +120,7 @@ nodePools:
             #!/bin/bash
             # Install the node bundles from the trial's package server.
             set -euxo pipefail
-            packages=http://10.96.100.100:8080
+            packages=http://10.128.100.100:8080
             work="$(mktemp -d)"
             cd "${work}"
             curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"

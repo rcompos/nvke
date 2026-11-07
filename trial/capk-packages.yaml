@@ -39,7 +39,7 @@ metadata:
   name: nvke-trial-packages
   namespace: default
 spec:
-  clusterIP: 10.96.100.100
+  clusterIP: 10.128.100.100
   selector:
     app: nvke-trial-packages
   ports:
