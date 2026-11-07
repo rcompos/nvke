@@ -107,11 +107,16 @@ controlPlaneConfig:
           # Copy the node's logs to the serial console, which the trial's
           # diagnostics read through the launcher pod.
           printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server > /dev/ttyS0'" \
+            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
             'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
             > /etc/systemd/system/nvke-trial-console.service
+          # Every 30s, copy addresses, routes and OVS bridges to the console.
+          printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
+            "ExecStart=/bin/sh -c 'while true; do ip -br addr; ip route; ovs-vsctl show 2>/dev/null; sleep 30; done > /dev/ttyS0'" \
+            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+            > /etc/systemd/system/nvke-trial-network.service
           systemctl daemon-reload
-          systemctl enable --now nvke-trial-console.service
+          systemctl enable --now nvke-trial-console.service nvke-trial-network.service
           systemctl enable nvke-agent.service spire-agent.service
           systemctl restart spire-agent.service
           cd /
@@ -247,11 +252,16 @@ nodePools:
             # Copy the node's logs to the serial console, which the trial's
             # diagnostics read through the launcher pod.
             printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server > /dev/ttyS0'" \
+              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
               'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
               > /etc/systemd/system/nvke-trial-console.service
+            # Every 30s, copy addresses, routes and OVS bridges to the console.
+            printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
+              "ExecStart=/bin/sh -c 'while true; do ip -br addr; ip route; ovs-vsctl show 2>/dev/null; sleep 30; done > /dev/ttyS0'" \
+              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+              > /etc/systemd/system/nvke-trial-network.service
             systemctl daemon-reload
-            systemctl enable --now nvke-trial-console.service
+            systemctl enable --now nvke-trial-console.service nvke-trial-network.service
             systemctl enable nvke-agent.service spire-agent.service
             systemctl restart spire-agent.service
             cd /
