@@ -145,8 +145,16 @@ jobs:
           done
           mask() { sed -E -e 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g' \
             -e 's/("?(token|certificateKey|caCertHashes|password|secret)"?) *[:=] *("[^"]*"|[^ ,}]+)/\1: <masked>/Ig'; }
-          if [[ -s trial/.state/tenant.kubeconfig ]]; then
-            export KUBECONFIG=trial/.state/tenant.kubeconfig
+          tenant_kubeconfig=trial/.state/tenant.kubeconfig
+          if [[ ! -s "${tenant_kubeconfig}" ]]; then
+            # The trial writes it only once the tenant is provisioned; before
+            # that, read Cluster API's own copy. It is not printed.
+            capi="$(kubectl -n nvke-system get clusters.cluster.x-k8s.io -o jsonpath='{.items[0].metadata.name}')"
+            tenant_kubeconfig="$(umask 077 && mktemp)"
+            kubectl -n nvke-system get secret "${capi}-kubeconfig" -o jsonpath='{.data.value}' | base64 -d > "${tenant_kubeconfig}"
+          fi
+          if [[ -s "${tenant_kubeconfig}" ]]; then
+            export KUBECONFIG="${tenant_kubeconfig}"
             echo "== tenant"
             kubectl get nodes -o wide
             kubectl get pods -A -o wide
@@ -165,7 +173,9 @@ jobs:
               echo "== tenant ${pod}"
               kubectl -n "${pod%/*}" describe pod "${pod#*/}" | sed -n '/^Containers:/,/^Conditions:/p' | grep -E '^  [a-z]|State|Reason|Exit Code|Restart Count'
               kubectl -n "${pod%/*}" logs "${pod#*/}" --all-containers --tail=40 | mask
+              kubectl -n "${pod%/*}" logs "${pod#*/}" --all-containers --previous --tail=60 | mask
             done
+            kubectl get events -A --sort-by=.lastTimestamp | tail -40
           fi
           true
 
