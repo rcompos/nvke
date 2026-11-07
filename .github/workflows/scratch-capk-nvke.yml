@@ -102,6 +102,21 @@ jobs:
           kubectl --kubeconfig "${TENANT_KUBECONFIG}" get pods -A
           trial/nvke-trial.sh status
 
+      # --providers gives CAPK's manager a SPIFFE identity; the tenant must also
+      # authorize it (spiffe.additionalCapiManagers), or its node reads fail.
+      - name: Check CAPK's access to the tenant
+        run: |
+          set -Eeuo pipefail
+          subject="$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" get clusterrolebinding nvke:capi-cluster-admin \
+            -o jsonpath='{range .subjects[*]}{.name}{"\n"}{end}' | grep '/capk-manager$')"
+          test "$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" auth can-i get nodes --as "${subject}")" = yes
+          kubectl --kubeconfig "${MGMT_KUBECONFIG}" -n capk-system get deploy capk-controller-manager \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].volumeMounts[*].name}{"\n"}'
+          denied="$(kubectl --kubeconfig "${MGMT_KUBECONFIG}" -n capk-system logs deploy/capk-controller-manager --since=3m \
+            | grep -c 'forbidden' || true)"
+          echo "CAPK forbidden errors in the last 3 minutes: ${denied}"
+          test "${denied}" -eq 0
+
       # Object lists, events, logs and the VMs' consoles; no kubeconfig and no
       # Secret. Tokens in the consoles are masked.
       - name: Diagnostics

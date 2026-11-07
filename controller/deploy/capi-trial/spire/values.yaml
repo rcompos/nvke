@@ -148,6 +148,8 @@ spire-server:
                   - capi-kubeadm-control-plane-system
                   - capi-kubeadm-bootstrap-system
                   - capd-system
+                  # CAPK's, for TRIAL_PROVIDER=capk.
+                  - capk-system
   nodeAttestor:
     k8sPSAT:
       # The agent moved to spire-system, so the server must accept it from

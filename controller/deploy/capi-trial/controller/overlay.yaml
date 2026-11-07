@@ -181,6 +181,10 @@ spiffe:
     className: spire-mgmt-spire
     tpmPubhashesConfigMapName: tpm-pubhashes
     serverPort: "30440"
+  # CAPK's manager reads tenant nodes; with TRIAL_PROVIDER=capk the tenant
+  # must authorize it as it does the CAPD manager.
+  additionalCapiManagers:
+    - capk-manager
 
 # The greenfield site profile, which the chart's legacy defaults do not carry.
 identity:

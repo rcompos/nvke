@@ -756,6 +756,12 @@ spiffe:
   # manager. Defaults to its local SPIFFE ID; set it to the rewritten subject
   # when CAPD uses an exchanged tenant kubeconfig.
   capdManagerSubject: ""
+  # -- Further Cluster API provider managers the nvke:capi-cluster-admin RBAC
+  # binding names, for providers other than core, kubeadm and CAPD (for example
+  # capk-manager). A bare service account name becomes
+  # spiffe://<trustDomain>/<servicePathSegment>/<name>; an entry starting with
+  # spiffe:// is used as given, and is required when jwtExchangeEndpoint is set.
+  additionalCapiManagers: []
   # -- SPIRE trust domain. When set, the chart renders ConfigMap rbacConfigMap.name.
   # Required when nvkeOIDCAuth.enabled is true: builds the
   # nvkeOIDCAuth.tenantRbacName SPIFFE subject ID in that ConfigMap. Must equal the
