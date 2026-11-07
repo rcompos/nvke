@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Serves the node bundles (nvke-agent, spire-agent, the Calico package) to the
+# tenant's KubeVirt VMs, which install them at boot. The trial copies the files
+# in after the pod starts. The address is fixed so trial/tenant-capk.yaml can
+# name it without depending on cluster DNS inside the VM.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvke-trial-packages
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nvke-trial-packages
+  template:
+    metadata:
+      labels:
+        app: nvke-trial-packages
+    spec:
+      containers:
+        - name: httpd
+          image: busybox:1.37
+          command: ["httpd", "-f", "-v", "-p", "8080", "-h", "/srv"]
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: srv
+              mountPath: /srv
+      volumes:
+        - name: srv
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvke-trial-packages
+  namespace: default
+spec:
+  clusterIP: 10.96.100.100
+  selector:
+    app: nvke-trial-packages
+  ports:
+    - port: 8080
+      targetPort: 8080

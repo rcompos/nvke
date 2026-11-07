@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The trial's tenant for TRIAL_PROVIDER=capk: KubeVirt VMs (CAPK) booting
+# CAPK's stock Ubuntu 24.04 disk, which carries kubeadm, kubelet and containerd
+# 1.34.1. At boot each VM fetches nvke-agent, spire-agent and the Calico package
+# from the trial's package server (trial/capk-packages.yaml) and installs them;
+# the controller's cloud-init then starts the agent, and the controller drives
+# kubeadm through it as on any other node.
+#
+# controlPlaneKubernetesVersion matches the disk's kubelet; the trial rewrites
+# its releases' machine-init-kubernetes-version to the same.
+
+name: trial-1
+controlPlaneKubernetesVersion: 1.34.1
+cniPlugin: calico
+etcdEncrypted: false
+
+controlPlaneConfig:
+  desiredCount: 1
+  systemReservedMemory: "1Gi"
+  infra:
+    bootstrapFiles:
+      - path: /usr/local/sbin/nvke-trial-install
+        owner: root:root
+        permissions: "0755"
+        content: |
+          #!/bin/bash
+          # Install the node bundles from the trial's package server.
+          set -euxo pipefail
+          packages=http://10.96.100.100:8080
+          work="$(mktemp -d)"
+          cd "${work}"
+          curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"
+          while read -r f; do
+            curl -fsS --retry 10 --retry-delay 2 --retry-all-errors -o "${f}" "${packages}/${f}"
+          done < files.txt
+          . ./versions.env
+          tar -xzf agent.tgz
+          (cd "agent_${NODE_AGENT_VERSION}_${NODE_AGENT_DIR_ARCH}" && ./agent-installer.sh) || true
+          test -x /usr/local/bin/nvke-agent
+          test -f /etc/systemd/system/nvke-agent.service
+          mkdir -p spire
+          tar -xzf spire-agent.tgz --strip-components=1 -C spire
+          (cd spire && ./install.sh)
+          # As on the CAPD node image: the agent reads the workload socket as root.
+          mkdir -p /etc/systemd/system/spire-agent.service.d
+          printf '[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\n' \
+            > /etc/systemd/system/spire-agent.service.d/override.conf
+          for deb in *.deb; do
+            if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
+          done
+          systemctl daemon-reload
+          systemctl enable nvke-agent.service spire-agent.service
+          systemctl restart spire-agent.service
+          cd /
+          rm -rf "${work}"
+    preKubeadmCommands:
+      - "/usr/local/sbin/nvke-trial-install > /var/log/nvke-trial-install.log 2>&1"
+    machineTemplate:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+      kind: KubevirtMachineTemplate
+      spec:
+        template:
+          spec:
+            # The node agent reports bootstrap to the controller; CAPK's SSH
+            # check for its sentinel file is not used.
+            virtualMachineBootstrapCheck:
+              checkStrategy: none
+            virtualMachineTemplate:
+              spec:
+                runStrategy: Always
+                template:
+                  spec:
+                    domain:
+                      cpu:
+                        cores: 2
+                      memory:
+                        guest: "3Gi"
+                      devices:
+                        networkInterfaceMultiqueue: true
+                        disks:
+                          - disk:
+                              bus: virtio
+                            name: containervolume
+                    evictionStrategy: External
+                    volumes:
+                      - containerDisk:
+                          image: quay.io/capk/ubuntu-2404-container-disk:v1.34.1
+                        name: containervolume
+
+nodePools:
+  - name: worker
+    nodeNamePrefix: w
+    desiredNodeCount: 1
+    controlPlane: false
+    systemReservedMemory: "1Gi"
+    nodeLabels:
+      tier: compute
+    autoProvisionDisabled: false
+    autoModeDisabled: false
+    recycleBudget: 0
+    infra:
+      bootstrapFiles:
+        - path: /usr/local/sbin/nvke-trial-install
+          owner: root:root
+          permissions: "0755"
+          content: |
+            #!/bin/bash
+            # Install the node bundles from the trial's package server.
+            set -euxo pipefail
+            packages=http://10.96.100.100:8080
+            work="$(mktemp -d)"
+            cd "${work}"
+            curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"
+            while read -r f; do
+              curl -fsS --retry 10 --retry-delay 2 --retry-all-errors -o "${f}" "${packages}/${f}"
+            done < files.txt
+            . ./versions.env
+            tar -xzf agent.tgz
+            (cd "agent_${NODE_AGENT_VERSION}_${NODE_AGENT_DIR_ARCH}" && ./agent-installer.sh) || true
+            test -x /usr/local/bin/nvke-agent
+            test -f /etc/systemd/system/nvke-agent.service
+            mkdir -p spire
+            tar -xzf spire-agent.tgz --strip-components=1 -C spire
+            (cd spire && ./install.sh)
+            # As on the CAPD node image: the agent reads the workload socket as root.
+            mkdir -p /etc/systemd/system/spire-agent.service.d
+            printf '[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\n' \
+              > /etc/systemd/system/spire-agent.service.d/override.conf
+            for deb in *.deb; do
+              if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
+            done
+            systemctl daemon-reload
+            systemctl enable nvke-agent.service spire-agent.service
+            systemctl restart spire-agent.service
+            cd /
+            rm -rf "${work}"
+      preKubeadmCommands:
+        - "/usr/local/sbin/nvke-trial-install > /var/log/nvke-trial-install.log 2>&1"
+      machineTemplate:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+        kind: KubevirtMachineTemplate
+        spec:
+          template:
+            spec:
+              # The node agent reports bootstrap to the controller; CAPK's SSH
+              # check for its sentinel file is not used.
+              virtualMachineBootstrapCheck:
+                checkStrategy: none
+              virtualMachineTemplate:
+                spec:
+                  runStrategy: Always
+                  template:
+                    spec:
+                      domain:
+                        cpu:
+                          cores: 2
+                        memory:
+                          guest: "3Gi"
+                        devices:
+                          networkInterfaceMultiqueue: true
+                          disks:
+                            - disk:
+                                bus: virtio
+                              name: containervolume
+                      evictionStrategy: External
+                      volumes:
+                        - containerDisk:
+                            image: quay.io/capk/ubuntu-2404-container-disk:v1.34.1
+                          name: containervolume
+
+infra:
+  cluster:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: KubevirtCluster
+    metadata:
+      name: trial-1
+    spec:
+      controlPlaneServiceTemplate:
+        spec:
+          type: ClusterIP

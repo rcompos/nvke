@@ -29,6 +29,11 @@
 #   TRIAL_SKIP_DISK_CHECK 1 skips the free-disk check
 #   TRIAL_SKIP_VALIDATE 1 ends `up` without validating
 #   TRIAL_SKIP_TENANT_VALIDATE 1 validates the site alone
+#   TRIAL_PROVIDER     capd (default): tenant nodes are Docker containers.
+#                      capk: KubeVirt VMs through Cluster API Provider KubeVirt;
+#                      Linux with /dev/kvm, amd64. The host needs a route to the
+#                      management cluster's pod network, which the trial adds
+#                      with sudo when it can.
 #
 # The CNI is Calico: Docker Desktop's kernel has no openvswitch module, so the
 # default OVN-Kubernetes cannot run on its nodes.
@@ -62,6 +67,23 @@ PORT_FORWARD_PID="${STATE_DIR}/port-forward.pid"
 PORT_FORWARD_LOG="${STATE_DIR}/port-forward.log"
 CAPI_CLUSTER_FILE="${STATE_DIR}/capi-cluster-name"
 SITE_NAME="trial"
+
+PROVIDER="${TRIAL_PROVIDER:-capd}"
+KUBEVIRT_VERSION="v1.9.1"
+CAPK_VERSION="v0.11.2"
+CALICO_MANIFEST_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml"
+# trial/kind-capk.yaml's ranges. The package server's address is in the
+# Service range; the VMs take addresses in the pod range.
+CAPK_POD_CIDR="10.244.0.0/16"
+CAPK_PACKAGES_DIR="${STATE_DIR}/capk-packages"
+CAPK_KUBERNETES_VERSION="1.34.1"
+RELEASES_DIR="${TRIAL_DIR}/releases"
+if [[ "${PROVIDER}" == capk ]]; then
+  TENANT_SPEC="${TRIAL_DIR}/tenant-capk.yaml"
+  SITE_NAMESPACES="${SITE_NAMESPACES/capd-system/capk-system,kubevirt}"
+  export KIND_CLUSTER_CONFIG="${TRIAL_DIR}/kind-capk.yaml"
+  RELEASES_DIR="${STATE_DIR}/releases-capk"
+fi
 
 export KUBECONFIG="${STATE_DIR}/mgmt.kubeconfig"
 # nvkectl keeps its site list under XDG_CONFIG_HOME; keep the trial's out of
@@ -129,6 +151,18 @@ preflight() {
     *) die "the trial runs on arm64 or amd64; this Docker daemon is ${arch}" ;;
   esac
 
+  case "${PROVIDER}" in
+    capd) ;;
+    capk)
+      # The disk image is amd64, and the VMs need hardware virtualization,
+      # which Docker Desktop's VM does not pass through.
+      [[ "$(uname -s)" == Linux ]] || die "TRIAL_PROVIDER=capk needs Linux with /dev/kvm"
+      [[ -c /dev/kvm ]] || die "TRIAL_PROVIDER=capk needs /dev/kvm"
+      [[ "${DOCKER_ARCH}" == amd64 ]] || die "TRIAL_PROVIDER=capk runs on amd64"
+      ;;
+    *) die "TRIAL_PROVIDER is capd or capk, not ${PROVIDER}" ;;
+  esac
+
   check_disk
 
   [[ -f "${TENANT_SPEC}" ]] || die "missing ${TENANT_SPEC}"
@@ -145,23 +179,81 @@ management_cluster() {
   gmk controller kind-up
   kind get kubeconfig --name "${KIND_CLUSTER_NAME}" >"${KUBECONFIG}"
   chmod 0600 "${KUBECONFIG}"
+  if [[ "${PROVIDER}" == capk ]]; then
+    management_calico
+    pod_network_route
+  fi
+}
+
+# kind-capk.yaml leaves out kindnet; without a CNI the node stays NotReady.
+management_calico() {
+  if ! kubectl -n kube-system get daemonset calico-node >/dev/null 2>&1; then
+    log "installing Calico on the management cluster"
+    curl -fsSL --retry 5 "${CALICO_MANIFEST_URL}" \
+      | sed -e 's|# - name: CALICO_IPV4POOL_CIDR|- name: CALICO_IPV4POOL_CIDR|' \
+        -e "s|#   value: \"192.168.0.0/16\"|  value: \"${CAPK_POD_CIDR}\"|" \
+      | kubectl apply -f - >/dev/null
+  fi
+  kubectl -n kube-system rollout status daemonset/calico-node --timeout=10m
+  kubectl wait --for=condition=Ready nodes --all --timeout=10m >/dev/null
+}
+
+# The tenant's API servers listen on VM addresses in the management cluster's
+# pod network. Reach them, as kubectl and the validation container must, through
+# the kind node.
+pod_network_route() {
+  local node
+  node="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' \
+    "${KIND_CLUSTER_NAME}-control-plane")"
+  [[ -n "${node}" ]] || die "could not read the kind control-plane address"
+  if ip route get "${CAPK_POD_CIDR%/*}" 2>/dev/null | grep -q "via ${node} "; then
+    return
+  fi
+  if sudo -n true 2>/dev/null; then
+    log "routing ${CAPK_POD_CIDR} through the kind node ${node}"
+    sudo ip route replace "${CAPK_POD_CIDR}" via "${node}"
+  else
+    die "route the pod network through the kind node, then re-run: sudo ip route replace ${CAPK_POD_CIDR} via ${node}"
+  fi
 }
 
 cluster_api() {
-  if kubectl get deployment -n capd-system capd-controller-manager >/dev/null 2>&1; then
-    log "Cluster API and CAPD: already installed"
+  if [[ "${PROVIDER}" == capk ]]; then
+    kubevirt
+  fi
+  local deployment=capd-system/capd-controller-manager name=CAPD
+  if [[ "${PROVIDER}" == capk ]]; then
+    deployment=capk-system/capk-controller-manager name=CAPK
+  fi
+  if kubectl get deployment -n "${deployment%/*}" "${deployment#*/}" >/dev/null 2>&1; then
+    log "Cluster API and ${name}: already installed"
     return
   fi
-  local version
+  local version infrastructure
   version="$(gmk controller -s --no-print-directory print-CAPI_CORE_VERSION)"
-  log "Cluster API and CAPD: installing ${version}"
+  infrastructure="docker:${version}"
+  if [[ "${PROVIDER}" == capk ]]; then
+    infrastructure="kubevirt:${CAPK_VERSION}"
+  fi
+  log "Cluster API ${version} and ${name}: installing"
   gmk controller clusterctl-install
   CLUSTER_TOPOLOGY=true "${CLUSTERCTL}" init \
     --core "cluster-api:${version}" \
     --bootstrap "kubeadm:${version}" \
     --control-plane "kubeadm:${version}" \
-    --infrastructure "docker:${version}" \
+    --infrastructure "${infrastructure}" \
     --wait-providers
+  kubectl wait deployment -A -l cluster.x-k8s.io/provider --for=condition=Available --timeout=10m >/dev/null
+}
+
+kubevirt() {
+  if ! kubectl get namespace kubevirt >/dev/null 2>&1; then
+    log "installing KubeVirt ${KUBEVIRT_VERSION}"
+    local base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
+    kubectl apply -f "${base}/kubevirt-operator.yaml" >/dev/null
+    kubectl apply -f "${base}/kubevirt-cr.yaml" >/dev/null
+  fi
+  kubectl -n kubevirt wait kv kubevirt --for condition=Available --timeout=15m >/dev/null
 }
 
 image_exists() { docker image inspect "$1" >/dev/null 2>&1; }
@@ -188,7 +280,17 @@ calico_package() {
 
 build() {
   calico_package
-  if [[ "${REBUILD}" == 1 ]] || ! image_exists "${NODE_IMAGE}"; then
+  if [[ "${PROVIDER}" == capk ]]; then
+    if [[ "${REBUILD}" == 1 ]] || [[ ! -s "${CAPK_PACKAGES_DIR}/files.txt" ]]; then
+      log "building the tenant node bundles (nvke-agent, spire-agent, Calico) into ${CAPK_PACKAGES_DIR}"
+      rm -rf "${CAPK_PACKAGES_DIR}"
+      CNI_PLUGIN=calico INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \
+        CAPD_NODE_BUNDLES_OUT="${CAPK_PACKAGES_DIR}" gmk controller capd-image
+      [[ -s "${CAPK_PACKAGES_DIR}/files.txt" ]] || die "the node bundles were not written to ${CAPK_PACKAGES_DIR}"
+    else
+      log "tenant node bundles: already built"
+    fi
+  elif [[ "${REBUILD}" == 1 ]] || ! image_exists "${NODE_IMAGE}"; then
     log "building the tenant node image ${NODE_IMAGE} (nvke-agent and Calico)"
     CNI_PLUGIN=calico INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \
       gmk controller capd-image
@@ -219,12 +321,15 @@ deploy_stack() {
   vip="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' \
     "${KIND_CLUSTER_NAME}-control-plane")"
   [[ -n "${vip}" ]] || die "could not read the kind control-plane address"
+  if [[ "${PROVIDER}" == capk ]]; then
+    capk_releases
+  fi
   log "deploying the site stack from controller/deploy/capi-trial (management address ${vip})"
   MANAGEMENT_VIP="${vip}" \
   STACK_DIR="${REPO_ROOT}" \
   DEPLOY_TARGET=capi-trial \
   NODE_AGENT_SPIRE_ATTESTATION_METHOD=joinToken \
-  NVKE_CONTROLLER_RELEASES_DIR="${TRIAL_DIR}/releases/${DOCKER_ARCH}" \
+  NVKE_CONTROLLER_RELEASES_DIR="${RELEASES_DIR}/${DOCKER_ARCH}" \
     bash "${REPO_ROOT}/controller/hack/ci/deploy-stack.sh" "${CONTROLLER_IMAGE}"
 
   # Tenant kubeconfigs authenticate with the SPIRE exec plugin, so every
@@ -233,6 +338,37 @@ deploy_stack() {
   log "patching the Cluster API provider controllers with the SPIRE exec-auth plugin"
   bash "${REPO_ROOT}/controller/hack/apply-capi-spiffe-exec-auth.sh" --kubeconfig "${KUBECONFIG}" --providers
   kubectl -n nvke-controller rollout status deployment/nvke-controller --timeout=10m
+  if [[ "${PROVIDER}" == capk ]]; then
+    package_server
+  fi
+}
+
+# The releases name the Kubernetes version a node boots with; CAPK's disk
+# carries 1.34.1 where the CAPD node image carries the kindest tag's.
+capk_releases() {
+  rm -rf "${RELEASES_DIR}"
+  mkdir -p "${RELEASES_DIR}"
+  cp -R "${TRIAL_DIR}/releases/${DOCKER_ARCH}" "${RELEASES_DIR}/"
+  local f
+  for f in "${RELEASES_DIR}/${DOCKER_ARCH}"/*.yaml; do
+    sed -i.bak -E "s|(machine-init-kubernetes-version: )\"[0-9.]+\"|\1\"${CAPK_KUBERNETES_VERSION}\"|" "${f}"
+    rm -f "${f}.bak"
+  done
+  grep -h "machine-init-kubernetes-version:" "${RELEASES_DIR}/${DOCKER_ARCH}"/*.yaml >&2
+}
+
+# The VMs fetch their bundles from here at boot (trial/tenant-capk.yaml).
+package_server() {
+  log "serving the node bundles to the tenant's VMs"
+  kubectl apply -f "${TRIAL_DIR}/capk-packages.yaml" >/dev/null
+  kubectl -n default rollout status deployment/nvke-trial-packages --timeout=5m
+  local pod f
+  pod="$(kubectl -n default get pods -l app=nvke-trial-packages -o jsonpath='{.items[0].metadata.name}')"
+  while read -r f; do
+    kubectl -n default cp "${CAPK_PACKAGES_DIR}/${f}" "${pod}:/srv/${f}"
+  done <"${CAPK_PACKAGES_DIR}/files.txt"
+  kubectl -n default cp "${CAPK_PACKAGES_DIR}/files.txt" "${pod}:/srv/files.txt"
+  kubectl -n default exec "${pod}" -- ls -l /srv
 }
 
 # ------------------------------------------------------------------- NVKE API
@@ -334,7 +470,15 @@ tenant_kubeconfig() {
 
   nvkectl get kubeconfig "${name}" --output-file "${TENANT_KUBECONFIG}"
   chmod 0600 "${TENANT_KUBECONFIG}"
-  if ! tenant_reachable; then
+  if [[ "${PROVIDER}" == capk ]]; then
+    # The server is a VM's address in the pod network; pod_network_route
+    # routes it through the kind node.
+    local deadline=$(($(date +%s) + 300))
+    until tenant_reachable; do
+      [[ "$(date +%s)" -ge "${deadline}" ]] && die "the tenant API is not reachable with ${TENANT_KUBECONFIG}; is ${CAPK_POD_CIDR} routed through the kind node?"
+      sleep 10
+    done
+  elif ! tenant_reachable; then
     # Docker Desktop does not route container addresses to the host, so point
     # the kubeconfig at the load balancer's published 127.0.0.1 port instead.
     [[ -n "${capi}" ]] || die "could not find the tenant's CAPI Cluster to rewrite its kubeconfig"
@@ -371,11 +515,19 @@ tenant_credential() {
   local capi node server dir
   capi="$(capi_cluster_name)"
   [[ -n "${capi}" ]] || die "could not find the tenant's CAPI Cluster"
-  node="$(docker ps --filter "label=io.x-k8s.kind.cluster=${capi}" \
-    --filter label=io.x-k8s.kind.role=control-plane --format '{{.Names}}' | head -n1)"
-  [[ -n "${node}" ]] || die "found no control-plane container for ${capi}"
-  server="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "${node}")"
-  [[ -n "${server}" ]] || die "could not read the address of ${node}"
+  if [[ "${PROVIDER}" == capk ]]; then
+    # A control-plane VM, which the kubeconfig already names.
+    server="$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" config view --minify \
+      -o jsonpath='{.clusters[0].cluster.server}')"
+    server="${server#https://}"
+    server="${server%:*}"
+  else
+    node="$(docker ps --filter "label=io.x-k8s.kind.cluster=${capi}" \
+      --filter label=io.x-k8s.kind.role=control-plane --format '{{.Names}}' | head -n1)"
+    [[ -n "${node}" ]] || die "found no control-plane container for ${capi}"
+    server="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "${node}")"
+  fi
+  [[ -n "${server}" ]] || die "could not read the tenant API server's address"
 
   kubectl --kubeconfig "${TENANT_KUBECONFIG}" apply -f "${TENANT_VALIDATE_RBAC}" >/dev/null
   dir="${VALIDATE_DIR}/credential"
@@ -426,13 +578,19 @@ validate() {
     )
   fi
 
-  kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}" >"${VALIDATE_DIR}/kubeconfig"
+  # A CAPK tenant's API is on a VM in the pod network, which the host routes
+  # (pod_network_route) and kind's Docker network does not.
+  local network=kind internal=--internal
+  if [[ "${PROVIDER}" == capk ]]; then
+    network=host internal=
+  fi
+  kind get kubeconfig ${internal} --name "${KIND_CLUSTER_NAME}" >"${VALIDATE_DIR}/kubeconfig"
   chmod 0600 "${VALIDATE_DIR}/kubeconfig"
 
   log "validating ${what}: controller ${controller_version}, Kubernetes ${kubernetes_version}"
   local name="nvke-validate-${KIND_CLUSTER_NAME}" rc=0
   docker rm -f "${name}" >/dev/null 2>&1 || true
-  docker run --rm --name "${name}" --network kind --user "$(id -u):$(id -g)" \
+  docker run --rm --name "${name}" --network "${network}" --user "$(id -u):$(id -g)" \
     -v "${VALIDATE_DIR}/artifacts:/artifacts" \
     -v "${VALIDATE_DIR}/kubeconfig:/kube/config:ro" \
     -e KUBECONFIG=/kube/config \
@@ -504,7 +662,10 @@ cmd_status() {
   fi
   local capi
   capi="$(capi_cluster_name 2>/dev/null || true)"
-  if [[ -n "${capi}" ]]; then
+  if [[ -n "${capi}" && "${PROVIDER}" == capk ]]; then
+    log "tenant VMs"
+    kubectl get vm,vmi -A -o wide 2>/dev/null || true
+  elif [[ -n "${capi}" ]]; then
     log "tenant containers"
     docker ps -a --filter "label=io.x-k8s.kind.cluster=${capi}" --format '{{.Names}}\t{{.Status}}'
     tenant_health "${capi}"

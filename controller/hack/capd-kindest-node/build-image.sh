@@ -378,6 +378,25 @@ else
   fetch_url "${spire_bundle_url}" "${build_context}/spire-agent.tgz"
 fi
 
+# For nodes that are not this image (e.g. KubeVirt VMs installing at boot):
+# write the bundles and packages out and stop before the image build.
+if [[ -n "${CAPD_NODE_BUNDLES_OUT:-}" ]]; then
+  mkdir -p "${CAPD_NODE_BUNDLES_OUT}"
+  cp "${build_context}/agent.tgz" "${build_context}/spire-agent.tgz" "${CAPD_NODE_BUNDLES_OUT}/"
+  for deb in "${build_context}"/scripts/*.deb; do
+    [[ -f "${deb}" ]] && cp "${deb}" "${CAPD_NODE_BUNDLES_OUT}/"
+  done
+  printf 'NODE_AGENT_VERSION=%s\nNODE_AGENT_DIR_ARCH=%s\n' \
+    "${effective_node_agent_version}" "${NODE_AGENT_DIR_ARCH}" > "${CAPD_NODE_BUNDLES_OUT}/versions.env"
+  : > "${CAPD_NODE_BUNDLES_OUT}/files.txt.new"
+  for f in "${CAPD_NODE_BUNDLES_OUT}"/*; do
+    [[ "${f}" == */files.txt* ]] || basename "${f}" >> "${CAPD_NODE_BUNDLES_OUT}/files.txt.new"
+  done
+  mv "${CAPD_NODE_BUNDLES_OUT}/files.txt.new" "${CAPD_NODE_BUNDLES_OUT}/files.txt"
+  ls -l "${CAPD_NODE_BUNDLES_OUT}"
+  exit 0
+fi
+
 # Through the mirror when one is set: the host daemon has none of its own, and
 # an anonymous docker.io pull from the shared CI egress returns 429 under load.
 kindest_node_image="${NKE_E2E_DOCKERHUB_MIRROR:+${NKE_E2E_DOCKERHUB_MIRROR}/}kindest/node"

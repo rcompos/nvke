@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# REVERT-WHEN-capk-nvke-done: scratch workflow, fork only, never for a PR.
+# The trial with TRIAL_PROVIDER=capk: the NVKE site on a kind management
+# cluster with KubeVirt and CAPK, and a tenant of two KubeVirt VMs.
+name: Scratch CAPK NVKE
+
+on:
+  push:
+    branches:
+      - scratch/capk-nvke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scratch-capk-nvke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TRIAL_PROVIDER: capk
+      TRIAL_WAIT_MINUTES: "40"
+      MGMT_KUBECONFIG: ${{ github.workspace }}/trial/.state/mgmt.kubeconfig
+      TENANT_KUBECONFIG: ${{ github.workspace }}/trial/.state/tenant.kubeconfig
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enable KVM access
+        run: |
+          set -Eeuo pipefail
+          test -e /dev/kvm || { echo "::error::this runner has no /dev/kvm"; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Free disk space
+        run: |
+          set -Eeuo pipefail
+          df -h /
+          sudo rm -rf -- \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+          free -g
+
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_instances=1024
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+
+      - name: Read pinned tool versions
+        id: versions
+        run: |
+          {
+            echo "helm_version=$(make --no-print-directory print-HELM_VERSION)"
+            echo "kind_version=$(make --no-print-directory print-KIND_VERSION)"
+            echo "kubectl_version=$(make --no-print-directory print-KUBECTL_VERSION)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ steps.versions.outputs.helm_version }}
+
+      - name: Set up kind and kubectl
+        uses: ./.github/actions/setup-kind
+        with:
+          kind_version: ${{ steps.versions.outputs.kind_version }}
+          kubectl_version: ${{ steps.versions.outputs.kubectl_version }}
+
+      - name: Install jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+
+      - name: Trial up
+        run: trial/nvke-trial.sh up
+
+      - name: Check the tenant
+        run: |
+          set -Eeuo pipefail
+          kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes -o wide
+          test "$(kubectl --kubeconfig "${TENANT_KUBECONFIG}" get nodes --no-headers | wc -l)" -eq 2
+          kubectl --kubeconfig "${TENANT_KUBECONFIG}" get pods -A
+          trial/nvke-trial.sh status
+
+      # Object lists, events, logs and the VMs' consoles; no kubeconfig and no
+      # Secret. Tokens in the consoles are masked.
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set +e -uo pipefail
+          export KUBECONFIG="${MGMT_KUBECONFIG}"
+          free -g
+          trial/nvke-trial.sh status
+          kubectl get clusters.cluster.x-k8s.io,machines.cluster.x-k8s.io,kubevirtclusters,kubevirtmachines -A -o wide
+          kubectl get vm,vmi -A -o wide
+          kubectl get pods -A -o wide
+          kubectl get events -A --sort-by=.lastTimestamp | tail -80
+          kubectl get machines.cluster.x-k8s.io -A -o yaml | sed -n '/^  status:/,/^- apiVersion/p' | head -120
+          kubectl -n capk-system logs deploy/capk-controller-manager --tail=100
+          kubectl -n capi-system logs deploy/capi-controller-manager --tail=60
+          kubectl -n nvke-controller logs deploy/nvke-controller --all-containers --tail=300 \
+            | sed -E 's/(token|password|secret)([^ ]*)[=:] *[^ ,}]+/\1\2=<masked>/Ig'
+          kubectl -n default logs deploy/nvke-trial-packages --tail=50
+          for pod in $(kubectl get pods -A -l kubevirt.io=virt-launcher -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'); do
+            echo "== ${pod} guest console"
+            kubectl -n "${pod%/*}" logs "${pod#*/}" -c guest-console-log --tail=400 \
+              | sed -E 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g'
+          done
+          true
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: capk-nvke-validation
+          path: trial/.state/validate
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Trial down
+        if: always()
+        run: trial/nvke-trial.sh down
