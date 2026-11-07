@@ -53,6 +53,26 @@ controlPlaneConfig:
           for deb in *.deb; do
             if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
           done
+          # The tenant VMs sit in the management cluster's pod network, whose
+          # Calico drops packets a VM sends from any address but its own, so
+          # tenant pod traffic must always be encapsulated.
+          sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' \
+            /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+          grep -q 'encapsulation: VXLAN$' /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+          # containerd 1.7 on this disk withholds NET_BIND_SERVICE from non-root
+          # containers, and node-local-dns binds port 53 as non-root. containerd
+          # 2.x allows unprivileged ports by default.
+          cfg=/etc/containerd/config.toml
+          if [ ! -s "${cfg}" ]; then mkdir -p /etc/containerd; containerd config default > "${cfg}"; fi
+          if grep -q 'enable_unprivileged_ports' "${cfg}"; then
+            sed -i 's/enable_unprivileged_ports = false/enable_unprivileged_ports = true/' "${cfg}"
+          elif grep -q '^ *\[plugins\."io\.containerd\.grpc\.v1\.cri"\] *$' "${cfg}"; then
+            sed -i '/^ *\[plugins\."io\.containerd\.grpc\.v1\.cri"\] *$/a\  enable_unprivileged_ports = true' "${cfg}"
+          else
+            printf '\n[plugins."io.containerd.grpc.v1.cri"]\n  enable_unprivileged_ports = true\n' >> "${cfg}"
+          fi
+          grep -q 'enable_unprivileged_ports = true' "${cfg}"
+          systemctl restart containerd
           # Copy the node's logs to the serial console, which the trial's
           # diagnostics read through the launcher pod.
           printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
@@ -142,6 +162,26 @@ nodePools:
             for deb in *.deb; do
               if [ -f "${deb}" ]; then dpkg -i "${deb}"; fi
             done
+            # The tenant VMs sit in the management cluster's pod network, whose
+            # Calico drops packets a VM sends from any address but its own, so
+            # tenant pod traffic must always be encapsulated.
+            sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' \
+              /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+            grep -q 'encapsulation: VXLAN$' /usr/share/nvke-cni/calico/manifests/custom-resources.yaml
+            # containerd 1.7 on this disk withholds NET_BIND_SERVICE from non-root
+            # containers, and node-local-dns binds port 53 as non-root. containerd
+            # 2.x allows unprivileged ports by default.
+            cfg=/etc/containerd/config.toml
+            if [ ! -s "${cfg}" ]; then mkdir -p /etc/containerd; containerd config default > "${cfg}"; fi
+            if grep -q 'enable_unprivileged_ports' "${cfg}"; then
+              sed -i 's/enable_unprivileged_ports = false/enable_unprivileged_ports = true/' "${cfg}"
+            elif grep -q '^ *\[plugins\."io\.containerd\.grpc\.v1\.cri"\] *$' "${cfg}"; then
+              sed -i '/^ *\[plugins\."io\.containerd\.grpc\.v1\.cri"\] *$/a\  enable_unprivileged_ports = true' "${cfg}"
+            else
+              printf '\n[plugins."io.containerd.grpc.v1.cri"]\n  enable_unprivileged_ports = true\n' >> "${cfg}"
+            fi
+            grep -q 'enable_unprivileged_ports = true' "${cfg}"
+            systemctl restart containerd
             # Copy the node's logs to the serial console, which the trial's
             # diagnostics read through the launcher pod.
             printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
