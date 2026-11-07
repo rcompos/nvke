@@ -127,6 +127,25 @@ jobs:
               | sed -E -e 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g' \
                   -e 's/("?(token|certificateKey|caCertHashes|password|secret)"?) *[:=] *("[^"]*"|[^ ,}]+)/\1: <masked>/Ig'
           done
+          mask() { sed -E -e 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g' \
+            -e 's/("?(token|certificateKey|caCertHashes|password|secret)"?) *[:=] *("[^"]*"|[^ ,}]+)/\1: <masked>/Ig'; }
+          if [[ -s trial/.state/tenant.kubeconfig ]]; then
+            export KUBECONFIG=trial/.state/tenant.kubeconfig
+            echo "== tenant"
+            kubectl get nodes -o wide
+            kubectl get pods -A -o wide
+            for pod in $(kubectl -n kube-system get pods -l k8s-app=node-local-dns -o name); do
+              echo "== tenant ${pod} previous"
+              kubectl -n kube-system logs "${pod}" --previous --tail=60 | mask
+            done
+            kubectl -n kube-system get configmap node-local-dns coredns -o yaml | mask
+            kubectl get installations.operator.tigera.io -o yaml | sed -n '/^  spec:/,/^  status:/p'
+            kubectl get ippools.crd.projectcalico.org -o yaml | sed -n '/^  spec:/,/^- apiVersion/p'
+            for pod in $(kubectl -n calico-system get pods -l k8s-app=calico-node -o name); do
+              echo "== tenant ${pod}"
+              kubectl -n calico-system logs "${pod}" -c calico-node --tail=60 | mask
+            done
+          fi
           true
 
       - name: Upload validation results
