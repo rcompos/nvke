@@ -106,7 +106,7 @@ controlPlaneConfig:
                       cpu:
                         cores: 2
                       memory:
-                        guest: "4Gi"
+                        guest: "5Gi"
                       devices:
                         networkInterfaceMultiqueue: true
                         disks:
