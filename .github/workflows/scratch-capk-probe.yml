@@ -190,26 +190,29 @@ jobs:
           wait_machines 1 10
 
       # CAPK's quickstart installs a CNI next; until then the nodes are
-      # NotReady. The API Service is a ClusterIP in the management cluster, so
-      # reach it through a port-forward.
+      # NotReady.
       - name: Install Calico on the workload cluster
         run: |
           set -Eeuo pipefail
           controller/.local/bin/clusterctl get kubeconfig "${CLUSTER_NAME}" -n default > "${RUNNER_TEMP}/workload.kubeconfig"
           chmod 0600 "${RUNNER_TEMP}/workload.kubeconfig"
+          # The kubeconfig points at the API Service's ClusterIP. A
+          # port-forward cannot reach it: with bridge binding the guest owns
+          # the launcher pod's IP, so nothing listens on the pod's localhost.
+          # Route the Service range through the kind node instead.
+          node_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' capk-probe-control-plane)"
+          sudo ip route replace 10.96.0.0/12 via "${node_ip}"
+          grep -n "server:" "${RUNNER_TEMP}/workload.kubeconfig"
           cat > "${RUNNER_TEMP}/workload-api.sh" <<'EOF'
-          wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" --server https://127.0.0.1:16443 --insecure-skip-tls-verify "$@"; }
-          # (Re)start the port-forward to the workload API until it answers.
+          wk() { kubectl --kubeconfig "${RUNNER_TEMP}/workload.kubeconfig" "$@"; }
           workload_api() {
             local i
             for i in $(seq 1 24); do
               wk get --raw /readyz > /dev/null 2>&1 && return 0
-              pkill -f "port-forward svc/${CLUSTER_NAME}-lb" || true
-              nohup kubectl -n default port-forward "svc/${CLUSTER_NAME}-lb" 16443:6443 >> "${RUNNER_TEMP}/port-forward.log" 2>&1 &
               sleep 5
             done
-            echo "::error::the workload API did not answer through the port-forward"
-            cat "${RUNNER_TEMP}/port-forward.log"
+            echo "::error::the workload API did not answer"
+            wk get --raw /readyz || true
             return 1
           }
           EOF
