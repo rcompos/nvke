@@ -148,7 +148,7 @@ controlPlaneConfig:
           cd /
           rm -rf "${work}"
     preKubeadmCommands:
-      - "/usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log > /dev/ttyS0"
+      - "bash -c 'set -o pipefail; /usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log | { cat > /dev/ttyS0 || cat > /dev/null; }'"
     machineTemplate:
       apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
       kind: KubevirtMachineTemplate
@@ -319,7 +319,7 @@ nodePools:
             cd /
             rm -rf "${work}"
       preKubeadmCommands:
-        - "/usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log > /dev/ttyS0"
+        - "bash -c 'set -o pipefail; /usr/local/sbin/nvke-trial-install 2>&1 | tee /var/log/nvke-trial-install.log | { cat > /dev/ttyS0 || cat > /dev/null; }'"
       machineTemplate:
         apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
         kind: KubevirtMachineTemplate
