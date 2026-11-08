@@ -59,8 +59,6 @@ VALIDATE_DIR="${STATE_DIR}/validate"
 # Every namespace the trial installs into that must run a ready pod. The
 # suite's default list is the NICo deploy path's.
 SITE_NAMESPACES="kube-system,cert-manager,capi-system,capi-kubeadm-bootstrap-system,capi-kubeadm-control-plane-system,capd-system,nvke-controller,postgres,spire-server,temporal"
-# The tenant's, with Calico.
-TENANT_NAMESPACES="kube-system,calico-system,calico-apiserver,tigera-operator"
 TENANT_VALIDATE_RBAC="${TRIAL_DIR}/validate-tenant-rbac.yaml"
 NVKECTL="${REPO_ROOT}/cli/bin/nvkectl"
 CLUSTERCTL="${REPO_ROOT}/controller/.local/bin/clusterctl"
@@ -73,6 +71,12 @@ SITE_NAME="trial"
 
 PROVIDER="${TRIAL_PROVIDER:-capd}"
 CNI="${TRIAL_CNI:-calico}"
+# The tenant's namespaces that must run a ready pod, by CNI.
+if [[ "${CNI}" == ovn-kubernetes ]]; then
+  TENANT_NAMESPACES="kube-system,ovn-kubernetes"
+else
+  TENANT_NAMESPACES="kube-system,calico-system,calico-apiserver,tigera-operator"
+fi
 KUBEVIRT_VERSION="v1.9.1"
 CAPK_VERSION="v0.11.2"
 CALICO_MANIFEST_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.30.1/manifests/calico.yaml"
