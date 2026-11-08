@@ -296,6 +296,26 @@ calico_package() {
   [[ -f "${deb}" ]] || die "the Calico manifests package was not built: ${deb}"
 }
 
+# The CAPK disk ships containerd 1.7, which cannot read the CNI spec 1.1.0
+# config OVN-Kubernetes writes. Serve the VMs the containerd 2.x release NVKE's
+# kubeadm-distro lock pins for this Kubernetes minor.
+capk_containerd() {
+  local lock out entry sha url
+  lock="$(find "${REPO_ROOT}/os-image/packages/kubeadm-distro/lock/amd64" -name "v${CAPK_KUBERNETES_VERSION%.*}.*.lock" | sort -V | tail -1)"
+  [[ -f "${lock}" ]] || die "no kubeadm-distro lock for Kubernetes ${CAPK_KUBERNETES_VERSION%.*}"
+  entry="$(awk '$1 == "artifact" && $2 == "containerd" {print $3, $4}' "${lock}")"
+  sha="${entry%% *}"
+  url="${entry#* }"
+  [[ -n "${sha}" && "${url}" == https://* ]] || die "no containerd artifact in ${lock}"
+  out="${CAPK_PACKAGES_DIR}/containerd.tgz"
+  if [[ ! -f "${out}" ]] || ! echo "${sha}  ${out}" | sha256sum -c --status; then
+    log "fetching ${url##*/} for the tenant VMs"
+    curl -fsSL --retry 5 -o "${out}" "${url}"
+    echo "${sha}  ${out}" | sha256sum -c --status || die "${url##*/} does not match ${lock}"
+  fi
+  grep -qx containerd.tgz "${CAPK_PACKAGES_DIR}/files.txt" || echo containerd.tgz >> "${CAPK_PACKAGES_DIR}/files.txt"
+}
+
 build() {
   calico_package
   if [[ "${PROVIDER}" == capk ]]; then
@@ -310,6 +330,7 @@ build() {
     else
       log "tenant node bundles: already built"
     fi
+    [[ "${CNI}" == calico ]] || capk_containerd
   elif [[ "${REBUILD}" == 1 ]] || ! image_exists "${NODE_IMAGE}"; then
     log "building the tenant node image ${NODE_IMAGE} (nvke-agent and Calico)"
     CNI_PLUGIN=calico INSTALL_CNI_AFTER_INIT=true CAPD_SPIRE_ATTESTATION_METHOD=joinToken \

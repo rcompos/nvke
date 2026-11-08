@@ -105,6 +105,16 @@ controlPlaneConfig:
             printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-nvke-trial-network.cfg
             netplan generate
           fi
+          # containerd 1.7 on this disk cannot read the CNI spec 1.1.0 config
+          # OVN-Kubernetes writes. Swap in the 2.x release the trial serves.
+          if [ -f containerd.tgz ]; then
+            ctrd_prefix="$(dirname "$(dirname "$(command -v containerd)")")"
+            systemctl stop containerd
+            tar -xzf containerd.tgz -C "${ctrd_prefix}"
+            systemctl start containerd
+            containerd --version
+            ctr version
+          fi
           # This disk ships containerd as a binary, not as the packages the CNI
           # debs depend on.
           # The OVN images package imports with ctr, by default /usr/local/bin/ctr.
@@ -273,6 +283,16 @@ nodePools:
               chmod 0600 /etc/netplan/50-nvke-trial.yaml
               printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-nvke-trial-network.cfg
               netplan generate
+            fi
+            # containerd 1.7 on this disk cannot read the CNI spec 1.1.0 config
+            # OVN-Kubernetes writes. Swap in the 2.x release the trial serves.
+            if [ -f containerd.tgz ]; then
+              ctrd_prefix="$(dirname "$(dirname "$(command -v containerd)")")"
+              systemctl stop containerd
+              tar -xzf containerd.tgz -C "${ctrd_prefix}"
+              systemctl start containerd
+              containerd --version
+              ctr version
             fi
             # This disk ships containerd as a binary, not as the packages the CNI
             # debs depend on.
