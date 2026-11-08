@@ -157,7 +157,7 @@ controlPlaneConfig:
                   spec:
                     domain:
                       cpu:
-                        cores: 2
+                        cores: 4
                       memory:
                         guest: "5Gi"
                       devices:
