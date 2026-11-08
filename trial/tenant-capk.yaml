@@ -34,6 +34,37 @@ controlPlaneConfig:
           packages=http://10.128.100.100:8080
           work="$(mktemp -d)"
           cd "${work}"
+          # Copy the node's logs to the serial console, which the trial's
+          # diagnostics read through the launcher pod.
+          printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
+            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
+            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+            > /etc/systemd/system/nvke-trial-console.service
+          # Every 2 min, copy addresses, routes, OVS bridges and the OVN
+          # containers' state and recent logs to the console.
+          cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
+          #!/bin/sh
+          while true; do
+            ip -br addr
+            ip route
+            ovs-vsctl show 2>/dev/null
+            crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
+            for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
+              [ -f "${f}" ] || continue
+              echo "== ${f}"
+              tail -n 15 "${f}"
+            done
+            tail -n 25 /var/log/nvke-trial-install.log
+            sleep 120
+          done
+          NETSTATE
+          chmod 0755 /usr/local/sbin/nvke-trial-netstate
+          printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
+            "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
+            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+            > /etc/systemd/system/nvke-trial-network.service
+          systemctl daemon-reload
+          systemctl enable --now nvke-trial-console.service nvke-trial-network.service
           curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"
           while read -r f; do
             curl -fsS --retry 10 --retry-delay 2 --retry-all-errors -o "${f}" "${packages}/${f}"
@@ -88,11 +119,8 @@ controlPlaneConfig:
           # The VM's NIC has the management Calico's MTU, 1480. OVN's default overlay
           # MTU, 1440, needs 1498 with the Geneve header, so lower it to fit.
           if [ -f cni-charts.deb ]; then
-            ovn_values="$(dpkg-query -W -f='${Package}\n' 'nvke-cni-ovn-charts*' | xargs -r dpkg -L | grep -E '/values-nv?ke\.yaml$')"
-            [ -n "${ovn_values}" ]
-            for f in ${ovn_values}; do
-              printf '\nmtu: 1400\n' >> "${f}"
-            done
+            ls -l /etc/dgx/ovn-kubernetes/
+            printf '\nmtu: 1400\n' >> /etc/dgx/ovn-kubernetes/values-nke.yaml
           fi
           calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
           if [ -f "${calico_cr}" ]; then
@@ -113,36 +141,6 @@ controlPlaneConfig:
           fi
           grep -q 'enable_unprivileged_ports = true' "${cfg}"
           systemctl restart containerd
-          # Copy the node's logs to the serial console, which the trial's
-          # diagnostics read through the launcher pod.
-          printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-            "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
-            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
-            > /etc/systemd/system/nvke-trial-console.service
-          # Every 2 min, copy addresses, routes, OVS bridges and the OVN
-          # containers' state and recent logs to the console.
-          cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
-          #!/bin/sh
-          while true; do
-            ip -br addr
-            ip route
-            ovs-vsctl show 2>/dev/null
-            crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
-            for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
-              [ -f "${f}" ] || continue
-              echo "== ${f}"
-              tail -n 15 "${f}"
-            done
-            sleep 120
-          done
-          NETSTATE
-          chmod 0755 /usr/local/sbin/nvke-trial-netstate
-          printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
-            "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
-            'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
-            > /etc/systemd/system/nvke-trial-network.service
-          systemctl daemon-reload
-          systemctl enable --now nvke-trial-console.service nvke-trial-network.service
           systemctl enable nvke-agent.service spire-agent.service
           systemctl restart spire-agent.service
           cd /
@@ -205,6 +203,37 @@ nodePools:
             packages=http://10.128.100.100:8080
             work="$(mktemp -d)"
             cd "${work}"
+            # Copy the node's logs to the serial console, which the trial's
+            # diagnostics read through the launcher pod.
+            printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
+              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
+              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+              > /etc/systemd/system/nvke-trial-console.service
+            # Every 2 min, copy addresses, routes, OVS bridges and the OVN
+            # containers' state and recent logs to the console.
+            cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
+            #!/bin/sh
+            while true; do
+              ip -br addr
+              ip route
+              ovs-vsctl show 2>/dev/null
+              crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
+              for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
+                [ -f "${f}" ] || continue
+                echo "== ${f}"
+                tail -n 15 "${f}"
+              done
+              tail -n 25 /var/log/nvke-trial-install.log
+              sleep 120
+            done
+            NETSTATE
+            chmod 0755 /usr/local/sbin/nvke-trial-netstate
+            printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
+              "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
+              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
+              > /etc/systemd/system/nvke-trial-network.service
+            systemctl daemon-reload
+            systemctl enable --now nvke-trial-console.service nvke-trial-network.service
             curl -fsS --retry 60 --retry-delay 2 --retry-all-errors -o files.txt "${packages}/files.txt"
             while read -r f; do
               curl -fsS --retry 10 --retry-delay 2 --retry-all-errors -o "${f}" "${packages}/${f}"
@@ -259,11 +288,8 @@ nodePools:
             # The VM's NIC has the management Calico's MTU, 1480. OVN's default overlay
             # MTU, 1440, needs 1498 with the Geneve header, so lower it to fit.
             if [ -f cni-charts.deb ]; then
-              ovn_values="$(dpkg-query -W -f='${Package}\n' 'nvke-cni-ovn-charts*' | xargs -r dpkg -L | grep -E '/values-nv?ke\.yaml$')"
-              [ -n "${ovn_values}" ]
-              for f in ${ovn_values}; do
-                printf '\nmtu: 1400\n' >> "${f}"
-              done
+              ls -l /etc/dgx/ovn-kubernetes/
+              printf '\nmtu: 1400\n' >> /etc/dgx/ovn-kubernetes/values-nke.yaml
             fi
             calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
             if [ -f "${calico_cr}" ]; then
@@ -284,36 +310,6 @@ nodePools:
             fi
             grep -q 'enable_unprivileged_ports = true' "${cfg}"
             systemctl restart containerd
-            # Copy the node's logs to the serial console, which the trial's
-            # diagnostics read through the launcher pod.
-            printf '%s\n' '[Unit]' 'Description=Copy node logs to the serial console' '' '[Service]' \
-              "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
-              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
-              > /etc/systemd/system/nvke-trial-console.service
-            # Every 2 min, copy addresses, routes, OVS bridges and the OVN
-            # containers' state and recent logs to the console.
-            cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
-            #!/bin/sh
-            while true; do
-              ip -br addr
-              ip route
-              ovs-vsctl show 2>/dev/null
-              crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
-              for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
-                [ -f "${f}" ] || continue
-                echo "== ${f}"
-                tail -n 15 "${f}"
-              done
-              sleep 120
-            done
-            NETSTATE
-            chmod 0755 /usr/local/sbin/nvke-trial-netstate
-            printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
-              "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
-              'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
-              > /etc/systemd/system/nvke-trial-network.service
-            systemctl daemon-reload
-            systemctl enable --now nvke-trial-console.service nvke-trial-network.service
             systemctl enable nvke-agent.service spire-agent.service
             systemctl restart spire-agent.service
             cd /
