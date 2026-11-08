@@ -85,6 +85,15 @@ controlPlaneConfig:
           # The tenant VMs sit in the management cluster's pod network, whose
           # Calico drops packets a VM sends from any address but its own, so
           # tenant pod traffic must always be encapsulated.
+          # The VM's NIC has the management Calico's MTU, 1480. OVN's default overlay
+          # MTU, 1440, needs 1498 with the Geneve header, so lower it to fit.
+          if [ -f cni-charts.deb ]; then
+            ovn_values="$(dpkg-query -W -f='${Package}\n' 'nvke-cni-ovn-charts*' | xargs -r dpkg -L | grep -E '/values-nv?ke\.yaml$')"
+            [ -n "${ovn_values}" ]
+            for f in ${ovn_values}; do
+              printf '\nmtu: 1400\n' >> "${f}"
+            done
+          fi
           calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
           if [ -f "${calico_cr}" ]; then
             sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' "${calico_cr}"
@@ -247,6 +256,15 @@ nodePools:
             # The tenant VMs sit in the management cluster's pod network, whose
             # Calico drops packets a VM sends from any address but its own, so
             # tenant pod traffic must always be encapsulated.
+            # The VM's NIC has the management Calico's MTU, 1480. OVN's default overlay
+            # MTU, 1440, needs 1498 with the Geneve header, so lower it to fit.
+            if [ -f cni-charts.deb ]; then
+              ovn_values="$(dpkg-query -W -f='${Package}\n' 'nvke-cni-ovn-charts*' | xargs -r dpkg -L | grep -E '/values-nv?ke\.yaml$')"
+              [ -n "${ovn_values}" ]
+              for f in ${ovn_values}; do
+                printf '\nmtu: 1400\n' >> "${f}"
+              done
+            fi
             calico_cr=/usr/share/nvke-cni/calico/manifests/custom-resources.yaml
             if [ -f "${calico_cr}" ]; then
               sed -i 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' "${calico_cr}"
