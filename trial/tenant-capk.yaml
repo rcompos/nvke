@@ -110,9 +110,26 @@ controlPlaneConfig:
             "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
             'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
             > /etc/systemd/system/nvke-trial-console.service
-          # Every 30s, copy addresses, routes and OVS bridges to the console.
+          # Every 2 min, copy addresses, routes, OVS bridges and the OVN
+          # containers' state and recent logs to the console.
+          cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
+          #!/bin/sh
+          while true; do
+            ip -br addr
+            ip route
+            ovs-vsctl show 2>/dev/null
+            crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
+            for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
+              [ -f "${f}" ] || continue
+              echo "== ${f}"
+              tail -n 15 "${f}"
+            done
+            sleep 120
+          done
+          NETSTATE
+          chmod 0755 /usr/local/sbin/nvke-trial-netstate
           printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
-            "ExecStart=/bin/sh -c 'while true; do ip -br addr; ip route; ovs-vsctl show 2>/dev/null; sleep 30; done > /dev/ttyS0'" \
+            "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
             'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
             > /etc/systemd/system/nvke-trial-network.service
           systemctl daemon-reload
@@ -255,9 +272,26 @@ nodePools:
               "ExecStart=/bin/sh -c 'journalctl -f -o short -u kubelet -u nvke-agent -u spire-agent -u containerd -u ovs-vswitchd -u ovsdb-server -u systemd-networkd > /dev/ttyS0'" \
               'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
               > /etc/systemd/system/nvke-trial-console.service
-            # Every 30s, copy addresses, routes and OVS bridges to the console.
+            # Every 2 min, copy addresses, routes, OVS bridges and the OVN
+            # containers' state and recent logs to the console.
+            cat > /usr/local/sbin/nvke-trial-netstate <<'NETSTATE'
+            #!/bin/sh
+            while true; do
+              ip -br addr
+              ip route
+              ovs-vsctl show 2>/dev/null
+              crictl ps -a 2>/dev/null | grep -E 'CONTAINER|ovn'
+              for f in /var/log/pods/ovn-kubernetes_*/*/*.log; do
+                [ -f "${f}" ] || continue
+                echo "== ${f}"
+                tail -n 15 "${f}"
+              done
+              sleep 120
+            done
+            NETSTATE
+            chmod 0755 /usr/local/sbin/nvke-trial-netstate
             printf '%s\n' '[Unit]' 'Description=Copy node network state to the serial console' '' '[Service]' \
-              "ExecStart=/bin/sh -c 'while true; do ip -br addr; ip route; ovs-vsctl show 2>/dev/null; sleep 30; done > /dev/ttyS0'" \
+              "ExecStart=/bin/sh -c '/usr/local/sbin/nvke-trial-netstate > /dev/ttyS0'" \
               'Restart=always' '' '[Install]' 'WantedBy=multi-user.target' \
               > /etc/systemd/system/nvke-trial-network.service
             systemctl daemon-reload

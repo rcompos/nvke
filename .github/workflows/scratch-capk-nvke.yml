@@ -139,7 +139,7 @@ jobs:
           kubectl -n default logs deploy/nvke-trial-packages --tail=50
           for pod in $(kubectl get pods -A -l kubevirt.io=virt-launcher -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'); do
             echo "== ${pod} guest console"
-            kubectl -n "${pod%/*}" logs "${pod#*/}" -c guest-console-log --tail=400 \
+            kubectl -n "${pod%/*}" logs "${pod#*/}" -c guest-console-log --tail=1500 \
               | sed -E -e 's/(--token|--discovery-token-ca-cert-hash|--certificate-key|join_token) *[= ] *[^ ]+/\1 <masked>/g' \
                   -e 's/("?(token|certificateKey|caCertHashes|password|secret)"?) *[:=] *("[^"]*"|[^ ,}]+)/\1: <masked>/Ig'
           done
@@ -153,15 +153,18 @@ jobs:
             # None of it is printed.
             capi="$(kubectl -n nvke-system get clusters.cluster.x-k8s.io -o jsonpath='{.items[0].metadata.name}')"
             d="$(umask 077 && mktemp -d)"
+            echo "== tenant ${capi}: secrets (names only)"
+            kubectl -n nvke-system get secrets -o name | grep -F "${capi}"
             kubectl -n nvke-system get secret "${capi}-ca" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${d}/ca.crt"
             kubectl -n nvke-system get secret "${capi}-ca" -o jsonpath='{.data.tls\.key}' | base64 -d > "${d}/ca.key"
             server="$(kubectl -n nvke-system get secret "${capi}-kubeconfig" -o jsonpath='{.data.value}' | base64 -d \
               | sed -n 's/^ *server: *//p' | head -1)"
             openssl req -new -newkey rsa:2048 -nodes -subj "/O=system:masters/CN=nvke-trial-diagnostics" \
-              -keyout "${d}/admin.key" -out "${d}/admin.csr" 2>/dev/null
+              -keyout "${d}/admin.key" -out "${d}/admin.csr" 2>&1 | grep -v "^[.+*-]*$"
             openssl x509 -req -in "${d}/admin.csr" -CA "${d}/ca.crt" -CAkey "${d}/ca.key" -CAcreateserial -days 1 \
-              -out "${d}/admin.crt" 2>/dev/null
+              -out "${d}/admin.crt" 2>&1 | grep -v "^Certificate request self-signature ok"
             tenant_kubeconfig="${d}/kubeconfig"
+            echo "== tenant server ${server:-<none>}; ca $(wc -c < "${d}/ca.crt") bytes; client cert $(wc -c < "${d}/admin.crt" 2>/dev/null || echo 0) bytes"
             kubectl config --kubeconfig "${tenant_kubeconfig}" set-cluster tenant --server="${server}" \
               --certificate-authority="${d}/ca.crt" --embed-certs >/dev/null
             kubectl config --kubeconfig "${tenant_kubeconfig}" set-credentials diagnostics \
