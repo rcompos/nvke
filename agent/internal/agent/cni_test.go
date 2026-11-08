@@ -719,6 +719,60 @@ func TestHelmValuesFileArgs(t *testing.T) {
 	}, helmValuesFileArgs(chartDir))
 }
 
+// A KubeVirt VM on a Calico pod network has a 1480 NIC; the chart's 1440 plus
+// Geneve needs 1498, and ovnkube-node exits until the pod MTU is lowered.
+func TestOvnUplinkPodMTU(t *testing.T) {
+	for name, tc := range map[string]struct {
+		values     map[string]string
+		podNetwork string
+		uplinkMTU  int
+		want       int
+	}{
+		"a 1500 uplink keeps the chart's 1440":        {podNetwork: "10.244.0.0/16/24", uplinkMTU: 1500},
+		"jumbo frames keep it too":                    {podNetwork: "10.244.0.0/16/24", uplinkMTU: 9000},
+		"a nested VM's 1480 lowers it to 1422":        {podNetwork: "10.244.0.0/16/24", uplinkMTU: 1480, want: 1422},
+		"a 1460 cloud network lowers it to 1402":      {podNetwork: "10.244.0.0/16/24", uplinkMTU: 1460, want: 1402},
+		"dual stack allows for the IPv6 header":       {podNetwork: "10.244.0.0/16/24,fd00:10:244::/48/64", uplinkMTU: 1500, want: 1422},
+		"a values file's MTU is the one checked":      {values: map[string]string{"values-nke.yaml": "mtu: 1400\n"}, podNetwork: "10.244.0.0/16/24", uplinkMTU: 1480},
+		"the last values file wins":                   {values: map[string]string{"values.yaml": "mtu: 1400\n", "values-nvke.yaml": "mtu: 8900\n"}, podNetwork: "10.244.0.0/16/24", uplinkMTU: 1500, want: 1442},
+		"values without mtu fall back to the chart's": {values: map[string]string{"values.yaml": "podNetwork: \"\"\n"}, podNetwork: "10.244.0.0/16/24", uplinkMTU: 1480, want: 1422},
+	} {
+		t.Run(name, func(t *testing.T) {
+			chartDir := t.TempDir()
+			for file, body := range tc.values {
+				require.NoError(t, os.WriteFile(filepath.Join(chartDir, file), []byte(body), 0o644))
+			}
+			runner := newOpenVSwitchTestRunner(t, map[string][]openVSwitchCommandResult{
+				"ip -j route show default":     {{output: []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"brenp1s0"}]`)}},
+				"ip -j link show dev brenp1s0": {{output: []byte(fmt.Sprintf(`[{"ifname":"brenp1s0","address":"02:11:22:33:44:55","mtu":%d}]`, tc.uplinkMTU))}},
+			})
+			server := &NodeAgentServer{Runner: runner}
+
+			got, err := server.ovnUplinkPodMTU(chartDir, tc.podNetwork)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	t.Run("an uplink too small for the header is an error", func(t *testing.T) {
+		runner := newOpenVSwitchTestRunner(t, map[string][]openVSwitchCommandResult{
+			"ip -j route show default": {{output: []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0"}]`)}},
+			"ip -j link show dev eth0": {{output: []byte(`[{"ifname":"eth0","address":"00:11:22:33:44:55","mtu":40}]`)}},
+		})
+		_, err := (&NodeAgentServer{Runner: runner}).ovnUplinkPodMTU(t.TempDir(), "10.244.0.0/16/24")
+		assert.ErrorContains(t, err, "cannot carry")
+	})
+
+	t.Run("no default route is an error", func(t *testing.T) {
+		runner := newOpenVSwitchTestRunner(t, map[string][]openVSwitchCommandResult{
+			"ip -j route show default": {{output: []byte(`[]`)}},
+		})
+		_, err := (&NodeAgentServer{Runner: runner}).ovnUplinkPodMTU(t.TempDir(), "10.244.0.0/16/24")
+		assert.ErrorIs(t, err, errOpenVSwitchDefaultRouteMissing)
+	})
+}
+
 func TestOvnStagedImageRepository(t *testing.T) {
 	chartDir := t.TempDir()
 	write := func(body string) {

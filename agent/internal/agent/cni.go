@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,6 +254,79 @@ func ovnImageRepository(registry, upstreamRepo string) string {
 	return strings.TrimRight(registry, "/") + "/" + path
 }
 
+const (
+	ovnMTUHelmValue = "mtu"
+	// ovnChartDefaultMTU is the chart's values.yaml default, for a chart whose
+	// values files set none.
+	ovnChartDefaultMTU = 1440
+	// ovnkube-node exits unless the encap interface's MTU covers the pod MTU
+	// plus the Geneve header: 58 bytes in single-stack IPv4, 78 otherwise.
+	ovnGeneveOverheadIPv4 = 58
+	ovnGeneveOverheadIPv6 = 78
+)
+
+// ovnChartMTU returns the pod MTU the chart's values files set, the last one winning.
+func ovnChartMTU(chartDir string) (int, error) {
+	mtu := ovnChartDefaultMTU
+	args := helmValuesFileArgs(chartDir)
+	for i := 1; i < len(args); i += 2 {
+		raw, err := os.ReadFile(args[i])
+		if err != nil {
+			return 0, err
+		}
+		var v struct {
+			MTU *int `yaml:"mtu"`
+		}
+		if err := yaml.Unmarshal(raw, &v); err != nil {
+			return 0, fmt.Errorf("parsing %s: %w", filepath.Base(args[i]), err)
+		}
+		if v.MTU != nil {
+			mtu = *v.MTU
+		}
+	}
+	return mtu, nil
+}
+
+// ovnGeneveOverhead returns the header ovnkube-node allows for. podNetworkCIDR
+// may carry OVN's host-subnet suffix, as in 10.244.0.0/16/24.
+func ovnGeneveOverhead(podNetworkCIDR string) int {
+	for _, part := range strings.Split(podNetworkCIDR, ",") {
+		addr, _, _ := strings.Cut(strings.TrimSpace(part), "/")
+		if ip, err := netip.ParseAddr(addr); err == nil && ip.Is6() {
+			return ovnGeneveOverheadIPv6
+		}
+	}
+	return ovnGeneveOverheadIPv4
+}
+
+// ovnUplinkPodMTU returns the pod MTU that fits the default-route interface
+// when the chart's does not, as on nested VMs or a cloud network below 1500.
+// It returns 0 when the chart's MTU fits, so an uplink of 1500 or more keeps it.
+func (s *NodeAgentServer) ovnUplinkPodMTU(chartDir, podNetworkCIDR string) (int, error) {
+	chartMTU, err := ovnChartMTU(chartDir)
+	if err != nil {
+		return 0, err
+	}
+	route, err := s.readOpenVSwitchDefaultRoute()
+	if err != nil {
+		return 0, err
+	}
+	link, err := s.readOpenVSwitchLink(route.Device)
+	if err != nil {
+		return 0, err
+	}
+	overhead := ovnGeneveOverhead(podNetworkCIDR)
+	if chartMTU+overhead <= link.MTU {
+		return 0, nil
+	}
+	if link.MTU <= overhead {
+		return 0, fmt.Errorf("%s MTU %d cannot carry the %d-byte Geneve header", link.Name, link.MTU, overhead)
+	}
+	slog.Info("lowering the OVN pod MTU to fit the uplink",
+		"interface", link.Name, "interfaceMTU", link.MTU, "chartMTU", chartMTU, "podMTU", link.MTU-overhead)
+	return link.MTU - overhead, nil
+}
+
 // ovnKubernetesCNIConfig keeps a container node's management interface out of
 // the OVN gateway bridge. Without a dummy gateway bridge, OVN adopts the
 // Docker veth as its uplink.
@@ -384,6 +459,19 @@ func (s *NodeAgentServer) runOvnKubernetesHelmInstallFromDir(chartDir, podNetwor
 		}
 	}
 	cniConfig = ovnKubernetesCNIConfig(cniConfig, os.Getenv(openVSwitchDatapathTypeEnv))
+	if _, set := cniConfig[ovnMTUHelmValue]; !set {
+		mtu, err := s.ovnUplinkPodMTU(chartDir, podNetworkCidr)
+		switch {
+		case err != nil:
+			slog.Warn("keeping the OVN chart's pod MTU; could not check it against the uplink", "err", err)
+		case mtu > 0:
+			cniConfig = maps.Clone(cniConfig)
+			if cniConfig == nil {
+				cniConfig = map[string]string{}
+			}
+			cniConfig[ovnMTUHelmValue] = strconv.Itoa(mtu)
+		}
+	}
 	args := buildOvnKubernetesHelmInstallArgs(chartDir, apiServer, podNetworkCidr, serviceCidr, s.CniImageRegistry, upstreamRepo, cniConfig)
 	stdout, err := s.Runner.Run("helm", args, &nvkeutils.CommandOptions{
 		Env: append(os.Environ(), "KUBECONFIG="+KubeConfig),
