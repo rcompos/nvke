@@ -93,17 +93,8 @@ controlPlaneConfig:
               DEBIAN_FRONTEND=noninteractive apt-get install -y openvswitch-switch
             fi
             systemctl enable --now openvswitch-switch
-            # The disk has two netplan files for the uplink, and the agent bridges
-            # it only when one file describes it. Keep one, with the same DHCP.
-            uplink="$(ip route show default | awk '{print $5; exit}')"
+            # The disk and cloud-init each describe the uplink; the agent merges them.
             head -n 40 /etc/netplan/*.yaml
-            mkdir -p /etc/netplan/nvke-trial-orig
-            mv /etc/netplan/*.yaml /etc/netplan/nvke-trial-orig/
-            printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      dhcp4: true\n' "${uplink}" \
-              > /etc/netplan/50-nvke-trial.yaml
-            chmod 0600 /etc/netplan/50-nvke-trial.yaml
-            printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-nvke-trial-network.cfg
-            netplan generate
           fi
           # containerd 1.7 on this disk cannot read the CNI spec 1.1.0 config
           # OVN-Kubernetes writes. Swap in the 2.x release the trial serves.
@@ -266,17 +257,8 @@ nodePools:
                 DEBIAN_FRONTEND=noninteractive apt-get install -y openvswitch-switch
               fi
               systemctl enable --now openvswitch-switch
-              # The disk has two netplan files for the uplink, and the agent bridges
-              # it only when one file describes it. Keep one, with the same DHCP.
-              uplink="$(ip route show default | awk '{print $5; exit}')"
+              # The disk and cloud-init each describe the uplink; the agent merges them.
               head -n 40 /etc/netplan/*.yaml
-              mkdir -p /etc/netplan/nvke-trial-orig
-              mv /etc/netplan/*.yaml /etc/netplan/nvke-trial-orig/
-              printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      dhcp4: true\n' "${uplink}" \
-                > /etc/netplan/50-nvke-trial.yaml
-              chmod 0600 /etc/netplan/50-nvke-trial.yaml
-              printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-nvke-trial-network.cfg
-              netplan generate
             fi
             # containerd 1.7 on this disk cannot read the CNI spec 1.1.0 config
             # OVN-Kubernetes writes. Swap in the 2.x release the trial serves.
