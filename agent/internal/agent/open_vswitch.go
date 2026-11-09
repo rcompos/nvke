@@ -89,8 +89,11 @@ type openVSwitchPlan struct {
 	defaultGateway string
 	configPath     string
 	config         []byte
-	address        string
-	netmask        string
+	// netplanDuplicates are other netplan files rewritten without an entry
+	// that configured the uplink the same way as the one bridged.
+	netplanDuplicates []openVSwitchNetplanFile
+	address           string
+	netmask           string
 }
 
 type persistedOpenVSwitchResult struct {

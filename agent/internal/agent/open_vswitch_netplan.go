@@ -4,11 +4,15 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -33,6 +37,55 @@ type openVSwitchNetplanCandidate struct {
 	document   openVSwitchNetplanDocument
 	uplinkName string
 	pending    bool
+}
+
+type openVSwitchNetplanFile struct {
+	path string
+	data []byte
+}
+
+// Two netplan entries can configure one NIC, as on an image that ships a
+// DHCP-on-every-NIC file beside the one cloud-init writes. They are merged
+// only when their addressing is the same; the most specific one is bridged.
+const (
+	openVSwitchNetplanMatchesByName = iota + 1
+	openVSwitchNetplanMatchesByMAC
+	openVSwitchNetplanNamesUplink
+	openVSwitchNetplanBridgesUplink
+)
+
+func (c openVSwitchNetplanCandidate) specificity(link openVSwitchLink) int {
+	switch {
+	case c.pending:
+		return openVSwitchNetplanBridgesUplink
+	case c.uplinkName == link.Name:
+		return openVSwitchNetplanNamesUplink
+	}
+	stanza, _ := c.document.ethernets[c.uplinkName].(map[string]any)
+	match, _ := stanza["match"].(map[string]any)
+	if mac, _ := match["macaddress"].(string); link.Address != "" && strings.EqualFold(mac, link.Address) {
+		return openVSwitchNetplanMatchesByMAC
+	}
+	return openVSwitchNetplanMatchesByName
+}
+
+// addressing is the candidate's stanza without the keys that only identify
+// the NIC or attach it to the bridge, so entries for one NIC can be compared.
+func (c openVSwitchNetplanCandidate) addressing(bridgeName string) map[string]any {
+	raw := c.document.ethernets[c.uplinkName]
+	if c.pending {
+		raw = c.document.bridges[bridgeName]
+	}
+	stanza, _ := raw.(map[string]any)
+	addressing := cloneStringMap(stanza)
+	for _, key := range []string{"match", "set-name", "macaddress", "interfaces", "openvswitch"} {
+		delete(addressing, key)
+	}
+	return addressing
+}
+
+func (c openVSwitchNetplanCandidate) String() string {
+	return filepath.Base(c.path) + " (" + c.uplinkName + ")"
 }
 
 func parseOpenVSwitchNetplanDocument(data []byte) (openVSwitchNetplanDocument, error) {
@@ -91,6 +144,7 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 
 	var candidates []openVSwitchNetplanCandidate
 	var allENCandidates []openVSwitchNetplanCandidate
+	documents := map[string]openVSwitchNetplanDocument{}
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -100,6 +154,7 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 		if parseErr != nil {
 			return openVSwitchPlan{}, fmt.Errorf("parse %s: %w", path, parseErr)
 		}
+		documents[path] = document
 		// Netplan may have been written before the connection dropped. Treat
 		// that bridge stanza as pending desired state and retry activation.
 		if openVSwitchBridgeUsesInterface(document.bridges[bridgeName], link.Name) {
@@ -128,11 +183,36 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 	if len(candidates) == 0 {
 		candidates = allENCandidates
 	}
-	if len(candidates) != 1 {
-		return openVSwitchPlan{}, fmt.Errorf("expected one netplan configuration for %s, got %d", link.Name, len(candidates))
+	if len(candidates) == 0 {
+		return openVSwitchPlan{}, fmt.Errorf("expected one netplan configuration for %s, got 0", link.Name)
 	}
 
+	slices.SortStableFunc(candidates, func(a, b openVSwitchNetplanCandidate) int {
+		return cmp.Compare(b.specificity(link), a.specificity(link))
+	})
 	selected := candidates[0]
+	selectedAddressing := selected.addressing(bridgeName)
+	duplicatePaths := map[string]bool{}
+	for _, duplicate := range candidates[1:] {
+		if !reflect.DeepEqual(duplicate.addressing(bridgeName), selectedAddressing) {
+			return openVSwitchPlan{}, fmt.Errorf("netplan configures %s differently in %s and %s; leave one entry for it",
+				link.Name, selected, duplicate)
+		}
+		delete(duplicate.document.ethernets, duplicate.uplinkName)
+		if duplicate.path != selected.path {
+			duplicatePaths[duplicate.path] = true
+		}
+		slog.Info("merging a duplicate netplan entry for the Open vSwitch uplink",
+			"interface", link.Name, "kept", selected.String(), "removed", duplicate.String())
+	}
+	var duplicates []openVSwitchNetplanFile
+	for _, path := range slices.Sorted(maps.Keys(duplicatePaths)) {
+		data, err := renderOpenVSwitchNetplanDocument(documents[path])
+		if err != nil {
+			return openVSwitchPlan{}, fmt.Errorf("render %s: %w", path, err)
+		}
+		duplicates = append(duplicates, openVSwitchNetplanFile{path: path, data: data})
+	}
 	if !selected.pending {
 		rawStanza, ok := selected.document.ethernets[selected.uplinkName]
 		if !ok {
@@ -163,18 +243,38 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 		return openVSwitchPlan{}, fmt.Errorf("render %s: %w", selected.path, err)
 	}
 	return openVSwitchPlan{
-		backend:        pb.OpenVSwitchReconciliationResult_NETWORK_BACKEND_NETPLAN,
-		bridgeName:     bridgeName,
-		uplinkName:     link.Name,
-		uplinkMAC:      link.Address,
-		uplinkMTU:      link.MTU,
-		defaultGateway: gateway,
-		configPath:     selected.path,
-		config:         data,
+		backend:           pb.OpenVSwitchReconciliationResult_NETWORK_BACKEND_NETPLAN,
+		bridgeName:        bridgeName,
+		uplinkName:        link.Name,
+		uplinkMAC:         link.Address,
+		uplinkMTU:         link.MTU,
+		defaultGateway:    gateway,
+		configPath:        selected.path,
+		config:            data,
+		netplanDuplicates: duplicates,
 	}, nil
 }
 
+// renderOpenVSwitchNetplanDocument drops the sections the parser created or a
+// merge emptied, so a file left with no entries is just its version.
+func renderOpenVSwitchNetplanDocument(document openVSwitchNetplanDocument) ([]byte, error) {
+	network, _ := document.root["network"].(map[string]any)
+	for _, name := range []string{"ethernets", "bridges"} {
+		if section, ok := network[name].(map[string]any); ok && len(section) == 0 {
+			delete(network, name)
+		}
+	}
+	return yaml.Marshal(document.root)
+}
+
 func (s *NodeAgentServer) applyOpenVSwitchNetplanPlan(ctx context.Context, plan openVSwitchPlan) error {
+	// Duplicates go first: a retry after a partial write then still finds the
+	// bridged entry, or the original one, but never two that disagree.
+	for _, duplicate := range plan.netplanDuplicates {
+		if err := atomicWriteFile(duplicate.path, duplicate.data, 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", duplicate.path, err)
+		}
+	}
 	if err := atomicWriteFile(plan.configPath, plan.config, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", plan.configPath, err)
 	}

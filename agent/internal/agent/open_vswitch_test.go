@@ -192,6 +192,131 @@ func TestOpenVSwitchNetplanPinsLocallyAdministeredMAC(t *testing.T) {
 	assert.Less(t, hwaddr, apply)
 }
 
+// The CAPK disk ships 51-kubevirt-netplan.yaml, DHCP on every enp*s* NIC, and
+// cloud-init writes 50-cloud-init.yaml for the same NIC by its MAC.
+const (
+	capkCloudInitNetplan = `network:
+  version: 2
+  ethernets:
+    enp1s0:
+      match:
+        macaddress: "02:11:22:33:44:55"
+      set-name: enp1s0
+      dhcp4: true
+`
+	capkImageNetplan = `---
+network:
+  version: 2
+  ethernets:
+    id0:
+      match:
+        name: enp*s*
+      dhcp4: true
+`
+)
+
+func writeNetplanFiles(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "etc/netplan"), 0o755))
+	for name, body := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(root, "etc/netplan", name), []byte(body), 0o600))
+	}
+	return root
+}
+
+func readNetplan(t *testing.T, root, name string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "etc/netplan", name))
+	require.NoError(t, err)
+	document := map[string]any{}
+	require.NoError(t, yaml.Unmarshal(data, &document))
+	return document["network"].(map[string]any)
+}
+
+func TestOpenVSwitchNetplanMergesDuplicateUplinkEntries(t *testing.T) {
+	link := openVSwitchLink{Name: "enp1s0", Address: "02:11:22:33:44:55", MTU: 1480}
+
+	t.Run("the image's pattern entry is dropped and cloud-init's is bridged", func(t *testing.T) {
+		root := writeNetplanFiles(t, map[string]string{
+			"50-cloud-init.yaml":       capkCloudInitNetplan,
+			"51-kubevirt-netplan.yaml": capkImageNetplan,
+		})
+		runner := newOpenVSwitchTestRunner(t, map[string][]openVSwitchCommandResult{
+			"netplan generate":                      {{}},
+			"ovs-vsctl --may-exist add-br brenp1s0": {{}},
+			"ovs-vsctl set bridge brenp1s0 other-config:hwaddr=02:11:22:33:44:55": {{}},
+			"netplan apply": {{}},
+		})
+		server := &NodeAgentServer{Runner: runner, RootPath: root, openVSwitchSettleDelay: 1}
+
+		plan, err := server.buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+		require.NoError(t, err)
+		require.NoError(t, server.applyOpenVSwitchNetplanPlan(context.Background(), plan))
+
+		assert.Equal(t, map[string]any{"version": float64(2)}, readNetplan(t, root, "51-kubevirt-netplan.yaml"))
+		network := readNetplan(t, root, "50-cloud-init.yaml")
+		bridge := network["bridges"].(map[string]any)["brenp1s0"].(map[string]any)
+		assert.Equal(t, true, bridge["dhcp4"])
+		assert.Equal(t, []any{"enp1s0"}, bridge["interfaces"])
+		assert.NotContains(t, bridge, "set-name")
+		assert.Equal(t, map[string]any{
+			"mtu":   float64(1480),
+			"match": map[string]any{"macaddress": "02:11:22:33:44:55"},
+		}, network["ethernets"].(map[string]any)["enp1s0"])
+	})
+
+	t.Run("entries that address the NIC differently are refused and nothing is written", func(t *testing.T) {
+		static := strings.Replace(capkImageNetplan, "dhcp4: true", "addresses: [10.0.0.5/24]", 1)
+		root := writeNetplanFiles(t, map[string]string{
+			"50-cloud-init.yaml":       capkCloudInitNetplan,
+			"51-kubevirt-netplan.yaml": static,
+		})
+		server := &NodeAgentServer{RootPath: root}
+
+		_, err := server.buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+
+		require.ErrorContains(t, err, "netplan configures enp1s0 differently in 50-cloud-init.yaml (enp1s0) and 51-kubevirt-netplan.yaml (id0)")
+		data, readErr := os.ReadFile(filepath.Join(root, "etc/netplan/51-kubevirt-netplan.yaml"))
+		require.NoError(t, readErr)
+		assert.Equal(t, static, string(data))
+	})
+
+	t.Run("a retry after the bridge was written still drops the duplicate", func(t *testing.T) {
+		root := writeNetplanFiles(t, map[string]string{
+			"50-cloud-init.yaml": `network:
+  version: 2
+  ethernets:
+    enp1s0:
+      mtu: 1480
+      match:
+        macaddress: "02:11:22:33:44:55"
+  bridges:
+    brenp1s0:
+      dhcp4: true
+      interfaces: [enp1s0]
+      openvswitch: {}
+`,
+			"51-kubevirt-netplan.yaml": capkImageNetplan,
+		})
+		server := &NodeAgentServer{RootPath: root}
+
+		plan, err := server.buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+
+		require.NoError(t, err)
+		require.Len(t, plan.netplanDuplicates, 1)
+		assert.Equal(t, filepath.Join(root, "etc/netplan/51-kubevirt-netplan.yaml"), plan.netplanDuplicates[0].path)
+		assert.Equal(t, filepath.Join(root, "etc/netplan/50-cloud-init.yaml"), plan.configPath)
+	})
+
+	t.Run("one entry writes no other file", func(t *testing.T) {
+		root := writeNetplanFiles(t, map[string]string{"50-cloud-init.yaml": capkCloudInitNetplan})
+		plan, err := (&NodeAgentServer{RootPath: root}).buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+		require.NoError(t, err)
+		assert.Empty(t, plan.netplanDuplicates)
+	})
+}
+
 func TestOpenVSwitchNetplanMatchNamePatterns(t *testing.T) {
 	link := openVSwitchLink{Name: "enp1s0", Address: "00:11:22:33:44:55"}
 	tests := map[string]struct {
