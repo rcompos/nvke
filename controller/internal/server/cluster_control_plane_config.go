@@ -346,6 +346,8 @@ func controlPlaneConfigSpecFromCreateAPI(
 
 	spec := db.ControlPlaneConfigSpec{
 		SystemReservedMemory:        c.SystemReservedMemory,
+		KubeReservedMemory:          c.KubeReservedMemory,
+		KubeReservedCPU:             c.KubeReservedCPU,
 		NodeLabels:                  db.CloneStringMap(c.NodeLabels),
 		TeleportEnabled:             teleportEnabled,
 		ProvisioningMonitorDisabled: provisioningMonitorDisabled,

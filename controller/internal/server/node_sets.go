@@ -88,6 +88,10 @@ func apiNodeSetFromDB(dbNodeSet *db.NodeSet) (api.NodeSet, error) {
 	if dbNodeSet.KubeReservedMemory != "" {
 		kubeReservedMemory = &dbNodeSet.KubeReservedMemory
 	}
+	var kubeReservedCPU *string
+	if dbNodeSet.KubeReservedCPU != "" {
+		kubeReservedCPU = &dbNodeSet.KubeReservedCPU
+	}
 
 	return api.NodeSet{
 		ID:                   dbNodeSet.ID,
@@ -95,6 +99,7 @@ func apiNodeSetFromDB(dbNodeSet *db.NodeSet) (api.NodeSet, error) {
 		DesiredCount:         dbNodeSet.DesiredCount,
 		SystemReservedMemory: dbNodeSet.SystemReservedMemory,
 		KubeReservedMemory:   kubeReservedMemory,
+		KubeReservedCPU:      kubeReservedCPU,
 		KubernetesVersion:    dbNodeSet.KubernetesVersion,
 		TeleportEnabled:      &dbNodeSet.TeleportEnabled,
 		Nico:                 apiNicoNodeSetProviderFromDB(dbNodeSet.Nico),

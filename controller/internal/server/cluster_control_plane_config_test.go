@@ -981,3 +981,26 @@ func TestControlPlaneVIPOverrideCreateAndScale(t *testing.T) {
 		})
 	}
 }
+
+func TestControlPlaneKubeReservedResources(t *testing.T) {
+	spec := controlPlaneConfigSpecFromCreateAPI(&api.CreateClusterControlPlaneConfig{
+		DesiredCount:       1,
+		KubeReservedMemory: "512Mi",
+		KubeReservedCPU:    "250m",
+	}, "1.34.2", false, db.ProviderTypeCAPI)
+	assert.Equal(t, "512Mi", spec.KubeReservedMemory)
+	assert.Equal(t, "250m", spec.KubeReservedCPU)
+
+	got := apiControlPlaneConfigFromDB(db.ControlPlaneConfig{DesiredCount: 1, ControlPlaneConfigSpec: spec})
+	assert.Equal(t, "512Mi", got.KubeReservedMemory)
+	assert.Equal(t, "250m", got.KubeReservedCPU)
+
+	cpu := "500m"
+	empty := ""
+	req := &api.UpdateClusterControlPlaneConfig{KubeReservedCPU: &cpu, KubeReservedMemory: &empty}
+	assert.True(t, hasClusterLevelControlPlaneUpdate(req))
+	cluster := &db.Cluster{ProviderType: db.ProviderTypeCAPI, ControlPlaneConfig: db.ControlPlaneConfig{DesiredCount: 1}}
+	require.NoError(t, (&clusterService{}).applyClusterLevelControlPlaneSpecUpdate(context.Background(), cluster, req, &spec))
+	assert.Equal(t, "500m", spec.KubeReservedCPU)
+	assert.Empty(t, spec.KubeReservedMemory, "an empty string restores the default")
+}

@@ -586,6 +586,9 @@ func applyUpdateNodePoolRequest(cluster db.Cluster, dbNodePool *db.NodePool, req
 	if req.KubeReservedMemory != nil {
 		dbNodePool.KubeReservedMemory = *req.KubeReservedMemory
 	}
+	if req.KubeReservedCPU != nil {
+		dbNodePool.KubeReservedCPU = *req.KubeReservedCPU
+	}
 	if req.RecycleBudget != nil {
 		dbNodePool.RecycleBudget = *req.RecycleBudget
 	}
@@ -886,6 +889,10 @@ func apiNodePoolFromDB(dbNodePool *db.NodePool) api.NodePool {
 	if dbNodePool.KubeReservedMemory != "" {
 		kubeReservedMemory = &dbNodePool.KubeReservedMemory
 	}
+	var kubeReservedCPU *string
+	if dbNodePool.KubeReservedCPU != "" {
+		kubeReservedCPU = &dbNodePool.KubeReservedCPU
+	}
 	return api.NodePool{
 		ID:                          dbNodePool.ID,
 		ClusterID:                   dbNodePool.ClusterID,
@@ -895,6 +902,7 @@ func apiNodePoolFromDB(dbNodePool *db.NodePool) api.NodePool {
 		KubernetesVersion:           dbNodePool.KubernetesVersion,
 		SystemReservedMemory:        &dbNodePool.SystemReservedMemory,
 		KubeReservedMemory:          kubeReservedMemory,
+		KubeReservedCPU:             kubeReservedCPU,
 		ControlPlane:                dbNodePool.ControlPlane,
 		NodeLabels:                  maps.Clone(dbNodePool.NodeLabels),
 		NodeTaints:                  apiNodeTaintsFromDB(dbNodePool.NodeTaints),
@@ -1048,6 +1056,7 @@ func dbNodePoolFromAPI(
 		KubernetesVersion:    kubernetesVersion,
 		SystemReservedMemory: req.SystemReservedMemory,
 		KubeReservedMemory:   req.KubeReservedMemory,
+		KubeReservedCPU:      req.KubeReservedCPU,
 		ControlPlane:         req.ControlPlane,
 		NodeLabels:           nodeLabels,
 		NodeTaints:           nodeTaints,

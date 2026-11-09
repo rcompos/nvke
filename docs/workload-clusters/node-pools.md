@@ -67,7 +67,7 @@ A node pool is a group of worker nodes that share an NVIDIA Infra Controller (NI
    - `<VPC_PREFIX_ID>`: a NICo virtual private cloud (VPC) prefix. Give exactly one of `vpcPrefixIDs` (sites with native networking) or `subnetIDs`.
    - `recycleBudget`: how many nodes auto mode may mark for replacement at once. See [Control automatic node replacement](#control-automatic-node-replacement).
 
-   Optional fields include `configProfile`, `sshKeyGroupIDs`, `systemReservedMemory` (default `16Gi`), `kubeReservedMemory` (default `2Gi`), `nodeLabels` and `nodeTaints`.
+   Optional fields include `configProfile`, `sshKeyGroupIDs`, `systemReservedMemory` (default `16Gi`), `kubeReservedMemory` (default `2Gi`), `kubeReservedCPU` (default `1000m`), `nodeLabels` and `nodeTaints`.
 
    - `nodeLabels` is a map of label keys to values, and `nodeTaints` a list of taints, each with a `key`, an optional `value` and an `effect` of `NoSchedule`, `PreferNoSchedule` or `NoExecute`. Both are fixed at creation.
    - They are applied to each node after it joins, before workloads can schedule on it. NVKE does not correct changes made to them outside NVKE afterwards, such as a label removed with `kubectl`.

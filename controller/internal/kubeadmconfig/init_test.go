@@ -121,6 +121,21 @@ func TestInitConfigRender_Golden(t *testing.T) {
 			},
 		},
 		{
+			name:             "init config with custom kube reserved cpu",
+			wantConfig:       "init_base.yaml",
+			wantKubeletPatch: "kubelet_configuration_patch_250m_cpu.yaml",
+			config: func() *InitConfig {
+				cfg := validInitConfig()
+				cfg.KubeReservedCPU = "250m"
+				return cfg
+			},
+			wantFiles: []fileFromFixture{
+				apiServerTerminationGracePatchFixture(),
+				apiServerAuditPolicyFixture(),
+				apiServerAuthConfigFixture("auth_config_anonymous_only.yaml"),
+			},
+		},
+		{
 			name:       "init config with auth prerequisite file",
 			wantConfig: "init_auth.yaml",
 			config: func() *InitConfig {

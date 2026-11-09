@@ -52,6 +52,9 @@ type InitConfig struct {
 	// KubeReservedMemory is the memory reserved for Kubernetes processes by the
 	// kubelet configuration patch. It defaults to 2Gi when empty.
 	KubeReservedMemory string
+	// KubeReservedCPU is the CPU reserved for Kubernetes processes by the
+	// kubelet configuration patch. It defaults to 1000m when empty.
+	KubeReservedCPU string
 	// AuthenticationConfig configures the authentication-config flag in the
 	// api server and generates the proper AuthenticationConfig file for OIDC.
 	AuthenticationConfig *OIDCAuthenticationConfig
@@ -115,7 +118,7 @@ func (config *InitConfig) Render() (*BootstrapArtifacts, error) {
 	artifacts := &BootstrapArtifacts{
 		ConfigYAML: configYAML,
 		Files: []File{
-			kubeletConfigurationPatch(cfg.SystemReservedMemory, cfg.KubeReservedMemory),
+			kubeletConfigurationPatch(cfg.SystemReservedMemory, cfg.KubeReservedMemory, cfg.KubeReservedCPU),
 			apiServerTerminationGracePatch(),
 			apiServerAuditPolicyFile(),
 		},

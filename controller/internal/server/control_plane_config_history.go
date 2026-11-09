@@ -87,6 +87,7 @@ func controlPlaneConfigDiff(prev, curr *db.ControlPlaneConfigSpec) []api.Control
 	addIfChanged("kubernetesVersion", prev.KubernetesVersion, curr.KubernetesVersion)
 	addIfChanged("systemReservedMemory", prev.SystemReservedMemory, curr.SystemReservedMemory)
 	addIfChanged("kubeReservedMemory", prev.KubeReservedMemory, curr.KubeReservedMemory)
+	addIfChanged("kubeReservedCPU", prev.KubeReservedCPU, curr.KubeReservedCPU)
 	addIfChanged("teleportEnabled", strconv.FormatBool(prev.TeleportEnabled), strconv.FormatBool(curr.TeleportEnabled))
 	addIfChanged("provisioningMonitorDisabled", strconv.FormatBool(prev.ProvisioningMonitorDisabled), strconv.FormatBool(curr.ProvisioningMonitorDisabled))
 

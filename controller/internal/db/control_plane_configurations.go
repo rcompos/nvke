@@ -31,6 +31,7 @@ type NodeAgentConfig struct {
 type ControlPlaneConfigSpec struct {
 	SystemReservedMemory        string                           `json:"system_reserved_memory,omitempty" bun:"-"`
 	KubeReservedMemory          string                           `json:"kube_reserved_memory,omitempty" bun:"-"`
+	KubeReservedCPU             string                           `json:"kube_reserved_cpu,omitempty" bun:"-"`
 	NodeLabels                  map[string]string                `json:"node_labels,omitempty" bun:"-"`
 	TeleportEnabled             bool                             `json:"teleport_enabled,omitempty" bun:"-"`
 	ProvisioningMonitorDisabled bool                             `json:"provisioning_monitor_disabled,omitempty" bun:"-"`

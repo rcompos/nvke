@@ -58,7 +58,7 @@ info:
     |---|---|
     | Field omitted | Unchanged. |
     | `null` | Rejected with 400. No field is nullable, and `null` does not clear a value. |
-    | `""` (empty string) | Stored as empty for `description` and `systemReservedMemory`. For `kubeReservedMemory`, restores the default. Rejected for `nico.release`. |
+    | `""` (empty string) | Stored as empty for `description` and `systemReservedMemory`. For `kubeReservedMemory` and `kubeReservedCPU`, restores the default. Rejected for `nico.release`. |
     | `[]` (empty array) | Clears the list. UUID arrays are de-duplicated. |
     | `nico` sub-object | Merged field by field, not replaced. |
 
@@ -1236,6 +1236,14 @@ components:
           type: string
           description: Memory reserved for system daemons. Nodes reserve 16Gi when omitted.
           x-go-type-skip-optional-pointer: true
+        kubeReservedMemory:
+          type: string
+          description: Memory reserved for Kubernetes components. Empty when the 2Gi default applies.
+          x-go-type-skip-optional-pointer: true
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components. Empty when the 1000m default applies.
+          x-go-type-skip-optional-pointer: true
         machineAnnotations:
           type: object
           additionalProperties:
@@ -1406,6 +1414,14 @@ components:
           default: "16Gi"
           description: Memory reserved for system daemons. Nodes reserve 16Gi when omitted.
           x-go-type-skip-optional-pointer: true
+        kubeReservedMemory:
+          type: string
+          description: Memory reserved for Kubernetes components. Default 2Gi.
+          x-go-type-skip-optional-pointer: true
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components, as a Kubernetes quantity such as 500m. Default 1000m.
+          x-go-type-skip-optional-pointer: true
         machineAnnotations:
           type: object
           additionalProperties:
@@ -1490,6 +1506,12 @@ components:
         systemReservedMemory:
           type: string
           description: Memory reserved for system daemons.
+        kubeReservedMemory:
+          type: string
+          description: Memory reserved for Kubernetes components. An empty string restores the 2Gi default.
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components. An empty string restores the 1000m default.
         teleportEnabled:
           x-fern-ignore: true
           type: boolean
@@ -1823,6 +1845,10 @@ components:
           description: Memory reserved for Kubernetes components. Default 2Gi.
           x-go-type-skip-optional-pointer: true
           x-order: 11
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components, as a Kubernetes quantity such as 500m. Default 1000m.
+          x-go-type-skip-optional-pointer: true
         controlPlane:
           x-fern-ignore: true
           type: boolean
@@ -1948,6 +1974,9 @@ components:
         kubeReservedMemory:
           type: string
           description: Memory reserved for Kubernetes components. An empty string restores the 2Gi default.
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components. An empty string restores the 1000m default.
         description:
           type: string
           description: Free-text description.
@@ -2034,6 +2063,9 @@ components:
           type: string
           description: Memory reserved for Kubernetes components. Empty when the 2Gi default applies.
           x-order: 14
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components. Empty when the 1000m default applies.
         controlPlane:
           x-fern-ignore: true
           type: boolean
@@ -2272,6 +2304,10 @@ components:
         kubeReservedMemory:
           type: string
           description: Memory reserved for Kubernetes components. Empty when the 2Gi default applies.
+          readOnly: true
+        kubeReservedCPU:
+          type: string
+          description: CPU reserved for Kubernetes components. Empty when the 1000m default applies.
           readOnly: true
         teleportEnabled:
           x-fern-ignore: true

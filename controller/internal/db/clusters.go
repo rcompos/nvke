@@ -239,6 +239,7 @@ func ControlPlaneConfigFromNodePool(np *NodePool) *ControlPlaneConfig {
 			NodeLabels:                  CloneStringMap(np.NodeLabels),
 			SystemReservedMemory:        np.SystemReservedMemory,
 			KubeReservedMemory:          np.KubeReservedMemory,
+			KubeReservedCPU:             np.KubeReservedCPU,
 			TeleportEnabled:             np.TeleportEnabled,
 			ProvisioningMonitorDisabled: np.ProvisioningMonitorDisabled,
 			KubernetesVersion:           np.KubernetesVersion,

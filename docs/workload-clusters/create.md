@@ -90,10 +90,12 @@ The cluster spec is a YAML file that describes the cluster, its control plane an
    | `controlPlaneConfig.desiredCount` | None, required | Number of control-plane nodes. Use an odd number so that etcd keeps a quorum. More than one requires `controlPlaneVIP` unless the controller enables the development override described below. Exactly two is excluded from automatic certificate renewal: create the cluster with one, or three or more. An existing two-node cluster cannot scale down to one and must be scaled to three or more. |
    | `controlPlaneConfig.maxSurge` | `0` | Extra control-plane nodes allowed during a rollout: `0` or `1`. |
    | `controlPlaneConfig.systemReservedMemory` | `16Gi` | Memory the kubelet reserves for system daemons. |
+   | `controlPlaneConfig.kubeReservedMemory` | `2Gi` | Memory the kubelet reserves for Kubernetes components. |
+   | `controlPlaneConfig.kubeReservedCPU` | `1000m` | CPU the kubelet reserves for Kubernetes components. On a 2-core node the default leaves too little CPU for the OVN-Kubernetes pods; lower it, for example to `250m`, or use larger nodes. |
    | `controlPlaneConfig.nodeLabels` | None | Labels applied to each control-plane node after it joins. Set at creation; updating them is not supported, see [Preview status and known limitations](../overview/preview-status.md#workload-clusters-and-node-pools). Control-plane nodes take no custom taints. |
    | `nico.configProfile` (control plane or node pool) | None | Optional. Without one, the nodes run no config profile hooks. |
    | `nodePools[].nodeNamePrefix` | None, required | Node names are `<WORKLOAD_CLUSTER>-<nodeNamePrefix>-<NNNN>` and must fit in 63 characters. |
-   | `nodePools[].systemReservedMemory` | `16Gi` | `kubeReservedMemory` defaults to `2Gi`. |
+   | `nodePools[].systemReservedMemory` | `16Gi` | `kubeReservedMemory` defaults to `2Gi` and `kubeReservedCPU` to `1000m`. |
    | `nodePools[].nico.diskSelectionStrategy` | `smallest` | The disk the OS is installed on: `smallest` or `largest`. |
 
    Node pools also take `recycleBudget` and `autoModeDisabled`, and accept `nodeLabels` and `nodeTaints`, which are applied to each node when it joins. [Manage node pools](node-pools.md) describes them. You can create the cluster with no `nodePools` and add pools later.

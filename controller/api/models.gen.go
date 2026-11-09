@@ -361,6 +361,12 @@ type ControlPlaneConfig struct {
 	// Infra Infra provider control plane fields.
 	Infra *InfraControlPlaneProvider `json:"infra,omitempty"`
 
+	// KubeReservedCPU CPU reserved for Kubernetes components. Empty when the 1000m default applies.
+	KubeReservedCPU string `json:"kubeReservedCPU,omitempty"`
+
+	// KubeReservedMemory Memory reserved for Kubernetes components. Empty when the 2Gi default applies.
+	KubeReservedMemory string `json:"kubeReservedMemory,omitempty"`
+
 	// LaunchLayer LaunchLayer settings for control-plane nodes.
 	LaunchLayer *LaunchLayerControlPlaneProvider `json:"launchLayer,omitempty"`
 
@@ -530,6 +536,12 @@ type CreateClusterControlPlaneConfig struct {
 	// Infra Infra provider fields for cluster-level control plane configuration. Mutually exclusive with `nico`.
 	Infra *InfraControlPlaneProvider `json:"infra,omitempty"`
 
+	// KubeReservedCPU CPU reserved for Kubernetes components, as a Kubernetes quantity such as 500m. Default 1000m.
+	KubeReservedCPU string `json:"kubeReservedCPU,omitempty"`
+
+	// KubeReservedMemory Memory reserved for Kubernetes components. Default 2Gi.
+	KubeReservedMemory string `json:"kubeReservedMemory,omitempty"`
+
 	// LaunchLayer LaunchLayer settings for the control-plane nodes. Same shape as
 	// LaunchLayerNodePoolProvider — control-plane nodes are still
 	// LaunchLayer machines. Fixed at creation.
@@ -665,8 +677,14 @@ type CreateNodePoolRequest struct {
 	// ProvisioningMonitorDisabled When true, nodes stuck in provisioning past the timeout are not recycled automatically.
 	ProvisioningMonitorDisabled *bool `json:"provisioningMonitorDisabled,omitempty"`
 
+	// RecycleBudget Maximum number of nodes recycled at once.
+	RecycleBudget *int `json:"recycleBudget,omitempty"`
+
 	// Infra Infra provider fields for a node pool. Mutually exclusive with `nico`.
 	Infra *InfraNodePoolProvider `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components, as a Kubernetes quantity such as 500m. Default 1000m.
+	KubeReservedCPU string `json:"kubeReservedCPU,omitempty"`
 
 	// LaunchLayer LaunchLayer settings for a node pool. instanceType is required, and
 	// at most one of hostOSProfile and vmProfile may be set.
@@ -687,9 +705,6 @@ type CreateNodePoolRequest struct {
 	// Generated names must fit within 63 characters (Kubernetes Node name limit).
 	// Maximum prefix length depends on cluster name length.
 	NodeNamePrefix NodeNamePrefix `json:"nodeNamePrefix"`
-
-	// RecycleBudget Maximum number of nodes recycled at once.
-	RecycleBudget *int `json:"recycleBudget,omitempty"`
 
 	// TeleportEnabled Whether Teleport SSH enrollment is enabled for nodes in this pool. When omitted, the server-side default for the site is applied based on pool role.
 	TeleportEnabled *bool `json:"teleportEnabled,omitempty"`
@@ -1402,11 +1417,17 @@ type NodePool struct {
 	// ProvisioningMonitorDisabled When true, nodes stuck in provisioning past the timeout are not recycled automatically.
 	ProvisioningMonitorDisabled bool `json:"provisioningMonitorDisabled"`
 
+	// RecycleBudget Maximum number of nodes recycled at once.
+	RecycleBudget int `json:"recycleBudget"`
+
 	// Conditions Lifecycle conditions: provisioning, provisioned, deleting.
 	Conditions NodePoolConditions `json:"conditions"`
 
 	// Infra Infra provider node pool fields.
 	Infra *InfraNodePoolProvider `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components. Empty when the 1000m default applies.
+	KubeReservedCPU *string `json:"kubeReservedCPU,omitempty"`
 
 	// LaunchLayer LaunchLayer settings for the pool.
 	LaunchLayer *LaunchLayerNodePoolProvider `json:"launchLayer,omitempty"`
@@ -1417,18 +1438,15 @@ type NodePool struct {
 	// MachineLabels Labels set on CAPI Machines only when they are created, including Machines created during scale-out or replacement. Fixed at node-pool creation. Not reconciled after provisioning. Keys under nke.nvidia.com, nke.io, nvke.nvidia.com, kubernetes.io, k8s.io, cluster.x-k8s.io and their subdomains require an explicit deployment allowlist entry for this metadata type.
 	MachineLabels map[string]string `json:"machineLabels,omitempty"`
 
+	// MaxSurge Nodes allowed above desiredNodeCount during a rollout. 0 means sequential: each
+	// node is torn down before its replacement is provisioned.
+	MaxSurge *int `json:"maxSurge,omitempty"`
+
 	// Nico NICo settings for the pool.
 	Nico *NicoNodePoolProvider `json:"nico,omitempty"`
 
 	// NodeNamePrefix Node names are `<cluster>-<prefix>-<NNNN>` (four-digit suffix), at most 63 characters in total.
 	NodeNamePrefix NodeNamePrefix `json:"nodeNamePrefix"`
-
-	// RecycleBudget Maximum number of nodes recycled at once.
-	RecycleBudget int `json:"recycleBudget"`
-
-	// MaxSurge Nodes allowed above desiredNodeCount during a rollout. 0 means sequential: each
-	// node is torn down before its replacement is provisioned.
-	MaxSurge *int `json:"maxSurge,omitempty"`
 
 	// TeleportEnabled Whether Teleport SSH enrollment is enabled for nodes in this pool.
 	TeleportEnabled *bool `json:"teleportEnabled,omitempty"`
@@ -1479,8 +1497,14 @@ type NodePoolCreateConfig struct {
 	// AutoModeDisabled Disables auto-mode (automatic node recycling).
 	AutoModeDisabled *bool `json:"autoModeDisabled,omitempty"`
 
+	// ProvisioningMonitorDisabled When true, nodes stuck in provisioning past the timeout are not recycled automatically.
+	ProvisioningMonitorDisabled *bool `json:"provisioningMonitorDisabled,omitempty"`
+
 	// Infra Infra provider fields for a node pool. Mutually exclusive with `nico`.
 	Infra *InfraNodePoolProvider `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components, as a Kubernetes quantity such as 500m. Default 1000m.
+	KubeReservedCPU string `json:"kubeReservedCPU,omitempty"`
 
 	// LaunchLayer LaunchLayer settings for a node pool. instanceType is required, and
 	// at most one of hostOSProfile and vmProfile may be set.
@@ -1502,9 +1526,6 @@ type NodePoolCreateConfig struct {
 	// Maximum prefix length depends on cluster name length.
 	NodeNamePrefix NodeNamePrefix `json:"nodeNamePrefix"`
 
-	// ProvisioningMonitorDisabled When true, nodes stuck in provisioning past the timeout are not recycled automatically.
-	ProvisioningMonitorDisabled *bool `json:"provisioningMonitorDisabled,omitempty"`
-
 	// RecycleBudget Maximum number of nodes recycled at once.
 	RecycleBudget *int `json:"recycleBudget,omitempty"`
 
@@ -1522,6 +1543,9 @@ type NodeSet struct {
 
 	// Infra Infra provider node set fields.
 	Infra *InfraNodeSetProvider `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components. Empty when the 1000m default applies.
+	KubeReservedCPU *string `json:"kubeReservedCPU,omitempty"`
 
 	// KubeReservedMemory Memory reserved for Kubernetes components. Empty when the 2Gi default applies.
 	KubeReservedMemory *string `json:"kubeReservedMemory,omitempty"`
@@ -1621,6 +1645,12 @@ type UpdateClusterControlPlaneConfig struct {
 	// leaves the stored value alone, a value replaces it, and an empty value clears it.
 	// Mutually exclusive with `nico`: a request carrying both is rejected with 400.
 	Infra *InfraControlPlaneProviderUpdate `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components. An empty string restores the 1000m default.
+	KubeReservedCPU *string `json:"kubeReservedCPU,omitempty"`
+
+	// KubeReservedMemory Memory reserved for Kubernetes components. An empty string restores the 2Gi default.
+	KubeReservedMemory *string `json:"kubeReservedMemory,omitempty"`
 
 	// LaunchLayer All LaunchLayer control-plane fields are fixed at creation: a request
 	// carrying one is rejected with 400. A body echoed from GET must have
@@ -1739,6 +1769,9 @@ type UpdateNodePoolRequest struct {
 	// leaves the stored value alone, a value replaces it, and an empty value clears it.
 	// Mutually exclusive with `nico`: a request carrying both is rejected with 400.
 	Infra *InfraNodePoolProviderUpdate `json:"infra,omitempty"`
+
+	// KubeReservedCPU CPU reserved for Kubernetes components. An empty string restores the 1000m default.
+	KubeReservedCPU *string `json:"kubeReservedCPU,omitempty"`
 
 	// KubeReservedMemory Memory reserved for Kubernetes components. An empty string restores the 2Gi default.
 	KubeReservedMemory *string `json:"kubeReservedMemory,omitempty"`

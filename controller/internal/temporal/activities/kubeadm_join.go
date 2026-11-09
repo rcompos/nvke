@@ -125,6 +125,7 @@ func (a *Activities) kubeadmJoin(ctx context.Context, node db.Node) (KubeadmJoin
 	joinConfig.KubernetesVersion = cluster.KubernetesVersion
 	joinConfig.SystemReservedMemory = nodePool.SystemReservedMemory
 	joinConfig.KubeReservedMemory = nodePool.KubeReservedMemory
+	joinConfig.KubeReservedCPU = nodePool.KubeReservedCPU
 
 	if authn := a.clusterAuthentication(cluster); node.ControlPlane && authn.Needed() {
 		joinConfig.AuthenticationConfig, err = kubeadmconfig.BuildClusterAuthenticationConfig(ctx, a.k8sClient, authn)

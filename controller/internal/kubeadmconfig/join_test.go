@@ -105,6 +105,16 @@ func TestJoinConfigRender_Golden(t *testing.T) {
 			},
 		},
 		{
+			name:             "worker join with custom kube reserved cpu",
+			wantConfig:       "join_worker.yaml",
+			wantKubeletPatch: "kubelet_configuration_patch_250m_cpu.yaml",
+			config: func() *JoinConfig {
+				cfg := validWorkerJoinConfig()
+				cfg.KubeReservedCPU = "250m"
+				return cfg
+			},
+		},
+		{
 			name:       "worker join config with local-dev preflight skip",
 			wantConfig: "join_local_dev.yaml",
 			config: func() *JoinConfig {

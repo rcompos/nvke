@@ -64,6 +64,9 @@ type JoinConfig struct {
 	// KubeReservedMemory is the memory reserved for Kubernetes processes by the
 	// kubelet configuration patch. It defaults to 2Gi when empty.
 	KubeReservedMemory string
+	// KubeReservedCPU is the CPU reserved for Kubernetes processes by the
+	// kubelet configuration patch. It defaults to 1000m when empty.
+	KubeReservedCPU string
 }
 
 // NewJoinConfigFromString parses the join configuration from a kubeadm join string.
@@ -196,7 +199,7 @@ func (config *JoinConfig) Render() (*BootstrapArtifacts, error) {
 
 	artifacts := &BootstrapArtifacts{
 		ConfigYAML: configYAML,
-		Files:      []File{kubeletConfigurationPatch(config.SystemReservedMemory, config.KubeReservedMemory)},
+		Files:      []File{kubeletConfigurationPatch(config.SystemReservedMemory, config.KubeReservedMemory, config.KubeReservedCPU)},
 	}
 
 	if config.ControlPlane {

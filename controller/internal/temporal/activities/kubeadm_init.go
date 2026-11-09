@@ -115,6 +115,7 @@ func (a *Activities) kubeadmInit(ctx context.Context, input KubeadmInitInput) er
 		KubeadmContainerMode:  kubeadmContainerMode,
 		SystemReservedMemory:  nodePool.SystemReservedMemory,
 		KubeReservedMemory:    nodePool.KubeReservedMemory,
+		KubeReservedCPU:       nodePool.KubeReservedCPU,
 	}
 	if authn := a.clusterAuthentication(cluster); authn.Needed() {
 		initConfig.AuthenticationConfig, err = kubeadmconfig.BuildClusterAuthenticationConfig(ctx, a.k8sClient, authn)

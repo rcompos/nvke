@@ -79,6 +79,7 @@ const (
 	defaultKubeletPatchFile          = defaultPatchesDirectory + "/kubeletconfiguration0+merge.yaml"
 	defaultSystemReservedMemory      = "16Gi"
 	defaultKubeReservedMemory        = "2Gi"
+	defaultKubeReservedCPU           = "1000m"
 	defaultAPIServerTerminationGrace = 45
 	// defaultEnabledAdmissionPlugins overrides kubeadm's own default
 	// enable-admission-plugins value rather than adding to it — kubeadm merges
@@ -273,7 +274,7 @@ func initKubeletConfiguration(containerMode bool, kubernetesVersion string) kube
 		// this only changes what happens when nothing is specified.
 		SeccompDefault: ptr.To(true),
 		KubeReserved: map[string]string{
-			"cpu":               "1000m",
+			"cpu":               defaultKubeReservedCPU,
 			memoryKey:           defaultKubeReservedMemory,
 			"ephemeral-storage": "1Gi",
 		},
@@ -364,12 +365,15 @@ spec:
 	}
 }
 
-func kubeletConfigurationPatch(systemReservedMemory, kubeReservedMemory string) File {
+func kubeletConfigurationPatch(systemReservedMemory, kubeReservedMemory, kubeReservedCPU string) File {
 	if systemReservedMemory == "" {
 		systemReservedMemory = defaultSystemReservedMemory
 	}
 	if kubeReservedMemory == "" {
 		kubeReservedMemory = defaultKubeReservedMemory
+	}
+	if kubeReservedCPU == "" {
+		kubeReservedCPU = defaultKubeReservedCPU
 	}
 
 	return File{
@@ -379,12 +383,12 @@ func kubeletConfigurationPatch(systemReservedMemory, kubeReservedMemory string) 
 		Content: []byte(fmt.Sprintf(`apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 kubeReserved:
-  cpu: "1000m"
+  cpu: %q
   memory: %q
   ephemeral-storage: "1Gi"
 systemReserved:
   memory: %q
-`, kubeReservedMemory, systemReservedMemory)),
+`, kubeReservedCPU, kubeReservedMemory, systemReservedMemory)),
 	}
 }
 

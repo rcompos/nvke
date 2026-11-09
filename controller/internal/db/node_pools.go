@@ -137,6 +137,7 @@ type NodePool struct {
 	Description          *string            `bun:"type:text"`
 	SystemReservedMemory string             `bun:"type:text,notnull,default:'16Gi'"`
 	KubeReservedMemory   string             `bun:"type:text,notnull,default:''"`
+	KubeReservedCPU      string             `bun:"type:text,notnull,default:''"`
 	ControlPlane         bool               `bun:"type:boolean,notnull"`
 	NodeLabels           map[string]string  `bun:"type:jsonb,notnull,default:'{}'"`
 	NodeTaints           []NodeTaint        `bun:"type:jsonb,notnull,default:'[]'"`

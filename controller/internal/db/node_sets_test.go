@@ -114,6 +114,11 @@ func TestNodePoolNeedsNewNodeSet(t *testing.T) {
 			pool.SystemReservedMemory = "2Gi"
 			return pool
 		}(), want: true},
+		{name: "reserved cpu changed", pool: func() db.NodePool {
+			pool := basePool
+			pool.KubeReservedCPU = "250m"
+			return pool
+		}(), want: true},
 	}
 
 	for _, tc := range tests {

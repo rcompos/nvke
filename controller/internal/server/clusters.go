@@ -556,6 +556,7 @@ func (s *clusterService) createInitialNodePools(ctx context.Context, tx db.Tx, c
 			NodeNamePrefix:              nodePoolConfig.NodeNamePrefix,
 			SystemReservedMemory:        nodePoolConfig.SystemReservedMemory,
 			KubeReservedMemory:          nodePoolConfig.KubeReservedMemory,
+			KubeReservedCPU:             nodePoolConfig.KubeReservedCPU,
 			NodeLabels:                  nodePoolConfig.NodeLabels,
 			NodeTaints:                  nodePoolConfig.NodeTaints,
 			ControlPlane:                nodePoolConfig.ControlPlane,
@@ -994,6 +995,8 @@ func hasClusterLevelControlPlaneUpdate(req *api.UpdateClusterControlPlaneConfig)
 	if req.NodeAgentConfig != nil ||
 		req.DesiredCount != nil ||
 		req.SystemReservedMemory != nil ||
+		req.KubeReservedMemory != nil ||
+		req.KubeReservedCPU != nil ||
 		req.TeleportEnabled != nil ||
 		req.Infra != nil {
 		return true
@@ -1058,6 +1061,12 @@ func (s *clusterService) applyClusterLevelControlPlaneSpecUpdate(
 	}
 	if req.SystemReservedMemory != nil {
 		spec.SystemReservedMemory = *req.SystemReservedMemory
+	}
+	if req.KubeReservedMemory != nil {
+		spec.KubeReservedMemory = *req.KubeReservedMemory
+	}
+	if req.KubeReservedCPU != nil {
+		spec.KubeReservedCPU = *req.KubeReservedCPU
 	}
 	if req.TeleportEnabled != nil {
 		spec.TeleportEnabled = *req.TeleportEnabled
@@ -1170,6 +1179,8 @@ func apiControlPlaneConfigFromDB(cfg db.ControlPlaneConfig) *api.ControlPlaneCon
 		NodeRebalanceDisabled:       &nodeRebalanceDisabled,
 		ProvisioningMonitorDisabled: &provisioningMonitorDisabled,
 		SystemReservedMemory:        cfg.SystemReservedMemory,
+		KubeReservedMemory:          cfg.KubeReservedMemory,
+		KubeReservedCPU:             cfg.KubeReservedCPU,
 		NodeLabels:                  maps.Clone(cfg.NodeLabels),
 		TeleportEnabled:             &teleportEnabled,
 		Nico:                        apiNicoControlPlaneProviderFromDB(cfg.Nico),

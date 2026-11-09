@@ -32,6 +32,7 @@ type NodeSet struct {
 	KubernetesVersion    string `bun:"type:text,notnull,default:''"`
 	SystemReservedMemory string `bun:"type:text,notnull,default:'16Gi'"`
 	KubeReservedMemory   string `bun:"type:text,notnull,default:''"`
+	KubeReservedCPU      string `bun:"type:text,notnull,default:''"`
 
 	CreatedAt       time.Time `bun:"type:timestamptz,notnull,default:current_timestamp"`
 	UpdatedAt       time.Time `bun:"type:timestamptz,notnull,default:current_timestamp"`
@@ -48,6 +49,7 @@ func NodePoolNeedsNewNodeSet(nodePool NodePool, current NodeSet) bool {
 		nodePool.KubernetesVersion != current.KubernetesVersion ||
 		nodePool.SystemReservedMemory != current.SystemReservedMemory ||
 		nodePool.KubeReservedMemory != current.KubeReservedMemory ||
+		nodePool.KubeReservedCPU != current.KubeReservedCPU ||
 		nodePool.TeleportEnabled != current.TeleportEnabled {
 		return true
 	}
