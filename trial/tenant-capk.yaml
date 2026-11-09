@@ -18,10 +18,11 @@ etcdEncrypted: false
 
 controlPlaneConfig:
   desiredCount: 1
-  # Off container nodes the kubelet also reserves 2Gi and one CPU for
-  # Kubernetes components, which the control plane cannot lower; the VM is
-  # sized so something is left.
+  # The kubelet's defaults (16Gi system, 2Gi and one CPU for Kubernetes) would
+  # leave a 2-core VM too little for the OVN-Kubernetes pods.
   systemReservedMemory: "512Mi"
+  kubeReservedMemory: "512Mi"
+  kubeReservedCPU: "250m"
   infra:
     bootstrapFiles:
       - path: /usr/local/sbin/nvke-trial-install
@@ -159,7 +160,7 @@ controlPlaneConfig:
                   spec:
                     domain:
                       cpu:
-                        cores: 4
+                        cores: 2
                       memory:
                         guest: "5Gi"
                       devices:
@@ -181,6 +182,7 @@ nodePools:
     controlPlane: false
     systemReservedMemory: "512Mi"
     kubeReservedMemory: "512Mi"
+    kubeReservedCPU: "250m"
     nodeLabels:
       tier: compute
     autoProvisionDisabled: false
