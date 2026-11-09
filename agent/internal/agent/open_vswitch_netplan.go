@@ -45,39 +45,45 @@ type openVSwitchNetplanFile struct {
 }
 
 // Two netplan entries can configure one NIC, as on an image that ships a
-// DHCP-on-every-NIC file beside the one cloud-init writes. They are merged
-// only when their addressing is the same; the most specific one is bridged.
-const (
-	openVSwitchNetplanMatchesByName = iota + 1
-	openVSwitchNetplanMatchesByMAC
-	openVSwitchNetplanNamesUplink
-	openVSwitchNetplanBridgesUplink
-)
-
-func (c openVSwitchNetplanCandidate) specificity(link openVSwitchLink) int {
-	switch {
-	case c.pending:
-		return openVSwitchNetplanBridgesUplink
-	case c.uplinkName == link.Name:
-		return openVSwitchNetplanNamesUplink
+// DHCP-on-every-NIC file beside the one cloud-init writes. netplan renders each
+// entry to 10-netplan-<name>.network, and networkd applies only the first file,
+// by name, that matches the NIC; that entry is bridged and the others dropped,
+// so the node keeps the network it has. A bridge already written comes first.
+func compareOpenVSwitchNetplanCandidates(a, b openVSwitchNetplanCandidate) int {
+	if a.pending != b.pending {
+		if a.pending {
+			return -1
+		}
+		return 1
 	}
-	stanza, _ := c.document.ethernets[c.uplinkName].(map[string]any)
-	match, _ := stanza["match"].(map[string]any)
-	if mac, _ := match["macaddress"].(string); link.Address != "" && strings.EqualFold(mac, link.Address) {
-		return openVSwitchNetplanMatchesByMAC
-	}
-	return openVSwitchNetplanMatchesByName
+	return cmp.Or(cmp.Compare(a.uplinkName, b.uplinkName), cmp.Compare(a.path, b.path))
 }
 
-// addressing is the candidate's stanza without the keys that only identify
-// the NIC or attach it to the bridge, so entries for one NIC can be compared.
-func (c openVSwitchNetplanCandidate) addressing(bridgeName string) map[string]any {
+func (c openVSwitchNetplanCandidate) stanza(bridgeName string) map[string]any {
 	raw := c.document.ethernets[c.uplinkName]
 	if c.pending {
 		raw = c.document.bridges[bridgeName]
 	}
 	stanza, _ := raw.(map[string]any)
-	addressing := cloneStringMap(stanza)
+	return stanza
+}
+
+// renderer is the backend netplan hands the entry to; networkd unless set.
+func (c openVSwitchNetplanCandidate) renderer(bridgeName string) string {
+	if renderer, _ := c.stanza(bridgeName)["renderer"].(string); renderer != "" {
+		return renderer
+	}
+	network, _ := c.document.root["network"].(map[string]any)
+	if renderer, _ := network["renderer"].(string); renderer != "" {
+		return renderer
+	}
+	return "networkd"
+}
+
+// addressing is the candidate's stanza without the keys that only identify
+// the NIC or attach it to the bridge, so entries for one NIC can be compared.
+func (c openVSwitchNetplanCandidate) addressing(bridgeName string) map[string]any {
+	addressing := cloneStringMap(c.stanza(bridgeName))
 	for _, key := range []string{"match", "set-name", "macaddress", "interfaces", "openvswitch"} {
 		delete(addressing, key)
 	}
@@ -187,14 +193,22 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 		return openVSwitchPlan{}, fmt.Errorf("expected one netplan configuration for %s, got 0", link.Name)
 	}
 
-	slices.SortStableFunc(candidates, func(a, b openVSwitchNetplanCandidate) int {
-		return cmp.Compare(b.specificity(link), a.specificity(link))
-	})
+	slices.SortStableFunc(candidates, compareOpenVSwitchNetplanCandidates)
 	selected := candidates[0]
 	selectedAddressing := selected.addressing(bridgeName)
 	duplicatePaths := map[string]bool{}
 	for _, duplicate := range candidates[1:] {
-		if !reflect.DeepEqual(duplicate.addressing(bridgeName), selectedAddressing) {
+		// Which entry wins is networkd's rule; another renderer has its own.
+		for _, c := range []openVSwitchNetplanCandidate{selected, duplicate} {
+			if renderer := c.renderer(bridgeName); renderer != "networkd" {
+				return openVSwitchPlan{}, fmt.Errorf("netplan configures %s in %s and %s, and %s uses renderer %s; leave one entry for it",
+					link.Name, selected, duplicate, c, renderer)
+			}
+		}
+		addressing := duplicate.addressing(bridgeName)
+		same := reflect.DeepEqual(addressing, selectedAddressing)
+		// netplan merges entries of one name across files instead of picking one.
+		if !same && duplicate.uplinkName == selected.uplinkName && !selected.pending {
 			return openVSwitchPlan{}, fmt.Errorf("netplan configures %s differently in %s and %s; leave one entry for it",
 				link.Name, selected, duplicate)
 		}
@@ -202,8 +216,13 @@ func (s *NodeAgentServer) buildOpenVSwitchNetplanPlan(link openVSwitchLink, gate
 		if duplicate.path != selected.path {
 			duplicatePaths[duplicate.path] = true
 		}
-		slog.Info("merging a duplicate netplan entry for the Open vSwitch uplink",
-			"interface", link.Name, "kept", selected.String(), "removed", duplicate.String())
+		if same {
+			slog.Info("merging a duplicate netplan entry for the Open vSwitch uplink",
+				"interface", link.Name, "kept", selected.String(), "removed", duplicate.String())
+		} else {
+			slog.Warn("dropping a netplan entry for the Open vSwitch uplink that networkd does not apply",
+				"interface", link.Name, "kept", selected.String(), "removed", duplicate.String(), "removedSettings", addressing)
+		}
 	}
 	var duplicates []openVSwitchNetplanFile
 	for _, path := range slices.Sorted(maps.Keys(duplicatePaths)) {

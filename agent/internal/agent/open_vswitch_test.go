@@ -192,8 +192,10 @@ func TestOpenVSwitchNetplanPinsLocallyAdministeredMAC(t *testing.T) {
 	assert.Less(t, hwaddr, apply)
 }
 
-// The CAPK disk ships 51-kubevirt-netplan.yaml, DHCP on every enp*s* NIC, and
-// cloud-init writes 50-cloud-init.yaml for the same NIC by its MAC.
+// The CAPK disk ships 51-kubevirt-netplan.yaml, DHCPv4 on every enp*s* NIC,
+// and cloud-init 25.1's fallback writes 50-cloud-init.yaml for the same NIC by
+// its MAC, with DHCPv6 too. networkd applies 10-netplan-enp1s0.network, the
+// first by name, so the node runs cloud-init's entry.
 const (
 	capkCloudInitNetplan = `network:
   version: 2
@@ -203,6 +205,7 @@ const (
         macaddress: "02:11:22:33:44:55"
       set-name: enp1s0
       dhcp4: true
+      dhcp6: true
 `
 	capkImageNetplan = `---
 network:
@@ -237,7 +240,7 @@ func readNetplan(t *testing.T, root, name string) map[string]any {
 func TestOpenVSwitchNetplanMergesDuplicateUplinkEntries(t *testing.T) {
 	link := openVSwitchLink{Name: "enp1s0", Address: "02:11:22:33:44:55", MTU: 1480}
 
-	t.Run("the image's pattern entry is dropped and cloud-init's is bridged", func(t *testing.T) {
+	t.Run("networkd's entry is bridged and the one it never applies is dropped", func(t *testing.T) {
 		root := writeNetplanFiles(t, map[string]string{
 			"50-cloud-init.yaml":       capkCloudInitNetplan,
 			"51-kubevirt-netplan.yaml": capkImageNetplan,
@@ -258,6 +261,7 @@ func TestOpenVSwitchNetplanMergesDuplicateUplinkEntries(t *testing.T) {
 		network := readNetplan(t, root, "50-cloud-init.yaml")
 		bridge := network["bridges"].(map[string]any)["brenp1s0"].(map[string]any)
 		assert.Equal(t, true, bridge["dhcp4"])
+		assert.Equal(t, true, bridge["dhcp6"])
 		assert.Equal(t, []any{"enp1s0"}, bridge["interfaces"])
 		assert.NotContains(t, bridge, "set-name")
 		assert.Equal(t, map[string]any{
@@ -266,21 +270,54 @@ func TestOpenVSwitchNetplanMergesDuplicateUplinkEntries(t *testing.T) {
 		}, network["ethernets"].(map[string]any)["enp1s0"])
 	})
 
-	t.Run("entries that address the NIC differently are refused and nothing is written", func(t *testing.T) {
-		static := strings.Replace(capkImageNetplan, "dhcp4: true", "addresses: [10.0.0.5/24]", 1)
+	t.Run("a pattern entry whose name sorts first is the one kept", func(t *testing.T) {
+		pattern := strings.Replace(capkImageNetplan, "id0:", "all-enp:", 1)
 		root := writeNetplanFiles(t, map[string]string{
 			"50-cloud-init.yaml":       capkCloudInitNetplan,
-			"51-kubevirt-netplan.yaml": static,
+			"51-kubevirt-netplan.yaml": pattern,
 		})
-		server := &NodeAgentServer{RootPath: root}
 
-		_, err := server.buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+		plan, err := (&NodeAgentServer{RootPath: root}).buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
 
-		require.ErrorContains(t, err, "netplan configures enp1s0 differently in 50-cloud-init.yaml (enp1s0) and 51-kubevirt-netplan.yaml (id0)")
-		data, readErr := os.ReadFile(filepath.Join(root, "etc/netplan/51-kubevirt-netplan.yaml"))
-		require.NoError(t, readErr)
-		assert.Equal(t, static, string(data))
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(root, "etc/netplan/51-kubevirt-netplan.yaml"), plan.configPath)
+		require.Len(t, plan.netplanDuplicates, 1)
+		assert.Equal(t, filepath.Join(root, "etc/netplan/50-cloud-init.yaml"), plan.netplanDuplicates[0].path)
 	})
+
+	refused := map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"one name in two files that differ, which netplan merges": {
+			files: map[string]string{
+				"50-cloud-init.yaml": capkCloudInitNetplan,
+				"60-static.yaml":     "network:\n  version: 2\n  ethernets:\n    enp1s0:\n      addresses: [10.0.0.5/24]\n",
+			},
+			want: "netplan configures enp1s0 differently in 50-cloud-init.yaml (enp1s0) and 60-static.yaml (enp1s0)",
+		},
+		"a renderer other than networkd": {
+			files: map[string]string{
+				"50-cloud-init.yaml":       capkCloudInitNetplan,
+				"51-kubevirt-netplan.yaml": strings.Replace(capkImageNetplan, "  version: 2\n", "  version: 2\n  renderer: NetworkManager\n", 1),
+			},
+			want: "51-kubevirt-netplan.yaml (id0) uses renderer NetworkManager",
+		},
+	}
+	for name, tc := range refused {
+		t.Run(name+" is refused and nothing is written", func(t *testing.T) {
+			root := writeNetplanFiles(t, tc.files)
+
+			_, err := (&NodeAgentServer{RootPath: root}).buildOpenVSwitchNetplanPlan(link, "10.0.0.1", "brenp1s0")
+
+			require.ErrorContains(t, err, tc.want)
+			for file, body := range tc.files {
+				data, readErr := os.ReadFile(filepath.Join(root, "etc/netplan", file))
+				require.NoError(t, readErr)
+				assert.Equal(t, body, string(data))
+			}
+		})
+	}
 
 	t.Run("a retry after the bridge was written still drops the duplicate", func(t *testing.T) {
 		root := writeNetplanFiles(t, map[string]string{
@@ -294,6 +331,7 @@ func TestOpenVSwitchNetplanMergesDuplicateUplinkEntries(t *testing.T) {
   bridges:
     brenp1s0:
       dhcp4: true
+      dhcp6: true
       interfaces: [enp1s0]
       openvswitch: {}
 `,
