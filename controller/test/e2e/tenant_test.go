@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/stretchr/testify/require"
@@ -537,6 +538,9 @@ func tenantSubtree(resolve managementResolver) func(spec testSpec) {
 			deleteAccepted      bool
 			previousAgentMethod string
 			agentMethodChanged  bool
+			// Set when the tenant checks created their probe namespace, so a
+			// tenant that outlives the run is left as it was found.
+			removeProbeNamespace func(context.Context) error
 		)
 
 		// Record any spec failure so the cluster delete can honor preserveOnFailure.
@@ -681,7 +685,9 @@ func tenantSubtree(resolve managementResolver) func(spec testSpec) {
 				validateNvkectlNodePoolLifecycle(&test)
 			}
 			if spec.validate.tenantChecks {
-				validateTenant(laneTenantTarget(&test, func() bool { return failed }), laneTenantSettings)
+				validateTenant(laneTenantTarget(&test, func() bool { return failed }, func(remove func(context.Context) error) {
+					removeProbeNamespace = remove
+				}), laneTenantSettings)
 			}
 		})
 
@@ -777,6 +783,11 @@ func tenantSubtree(resolve managementResolver) func(spec testSpec) {
 					"cluster", test.cluster.ID)
 			default:
 				deleted = test.deleteClusterAndWait(ctx, &deleteAccepted)
+			}
+			if removeProbeNamespace != nil && !deleted && !deleteAccepted {
+				if err := removeProbeNamespace(ctx); err != nil && !apierrors.IsNotFound(err) {
+					GinkgoLogr.Error(err, "removing the probe namespace from the tenant", "namespace", laneTenantSettings.checks.probeNamespace)
+				}
 			}
 			// Sized to what this node can actually contain rather than to the
 			// suite: WaitForClusterDeleted is bounded by the entry's
